@@ -149,33 +149,38 @@ final class FfeTournamentListParser
         return (int) $matches[2];
     }
 
-    private function extractRowDate(
-        string $rowText,
-        int $year
-    ): ?DateTimeImmutable {
-        if (
-            preg_match(
-                '/\b(\d{1,2})\s+([\p{L}]+)\.?\b/u',
-                $rowText,
-                $matches
-            ) !== 1
-        ) {
-            return null;
+private function extractRowDate(
+    string $rowText,
+    int $year
+): ?DateTimeImmutable {
+    preg_match_all(
+        '/\b(\d{1,2})\s+([\p{L}]+)\.?\b/u',
+        $rowText,
+        $matches,
+        PREG_SET_ORDER
+    );
+
+    foreach ($matches as $match) {
+        $day = (int) $match[1];
+        $month = $this->monthNumber($match[2]);
+
+        if ($month === null || $day < 1 || $day > 31) {
+            continue;
         }
 
-        $month = $this->monthNumber($matches[2]);
-
-        if ($month === null) {
-            return null;
-        }
-
-        return DateTimeImmutable::createFromFormat(
+        $date = DateTimeImmutable::createFromFormat(
             '!Y-n-j',
-            sprintf('%d-%d-%d', $year, $month, (int) $matches[1]),
+            sprintf('%d-%d-%d', $year, $month, $day),
             new DateTimeZone('Europe/Paris')
-        ) ?: null;
+        );
+
+        if ($date instanceof DateTimeImmutable) {
+            return $date;
+        }
     }
 
+    return null;
+}
     private function monthNumber(string $month): ?int
     {
         return self::MONTHS[$this->normalize($month)] ?? null;
