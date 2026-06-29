@@ -1,0 +1,41 @@
+name: Import FFE manuel - développement
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  import_64:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Déclencher l'import du département 64
+        env:
+          PBE_SECRET: ${{ secrets.PBE_WORDPRESS_TO_SERVICE_SECRET }}
+        run: |
+          set -euo pipefail
+
+          BODY='{"department":"64"}'
+          TIMESTAMP="$(date +%s)"
+          NONCE="$(openssl rand -hex 32)"
+
+          SIGNATURE="$(
+            printf '%s\n%s\n%s' \
+              "$TIMESTAMP" \
+              "$NONCE" \
+              "$BODY" \
+            | openssl dgst -sha256 -hmac "$PBE_SECRET" -hex \
+            | awk '{print $NF}'
+          )"
+
+          curl \
+            --fail-with-body \
+            --request POST \
+            --header "Content-Type: application/json" \
+            --header "X-PBE-Timestamp: $TIMESTAMP" \
+            --header "X-PBE-Nonce: $NONCE" \
+            --header "X-PBE-Signature: $SIGNATURE" \
+            --data "$BODY" \
+            "https://phelipot.pro/echecs/ffe-sync/trigger.php"

@@ -26,6 +26,11 @@ if (!is_file($configPath)) {
             throw new RuntimeException('Configuration du service introuvable.');
         }
 
+        if (!defined('PBE_FFE_SYNC_BOOTSTRAPPED')) {
+    define('PBE_FFE_SYNC_BOOTSTRAPPED', true);
+}
+
+
         $config = require $configPath;
 
         if (!is_array($config)) {
