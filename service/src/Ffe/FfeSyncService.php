@@ -145,6 +145,10 @@ final class FfeSyncService
                 new ClubRegistrationSyncService()
             )->refreshUpcomingRegistrations();
 
+            $stats['events'] = (
+    new UpcomingEventPayloadBuilder()
+)->buildUpcomingEvents();
+
             $this->finishRun(
                 $runId,
                 'succeeded',
