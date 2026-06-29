@@ -19,7 +19,9 @@ private readonly FfeTournamentListParser $listParser =
 private readonly FfeTournamentParser $parser =
     new FfeTournamentParser(),
     private readonly TournamentGroupingService $grouping =
-    new TournamentGroupingService()
+    new TournamentGroupingService(),
+    private readonly ClubRegistrationSyncService $registrations =
+    new ClubRegistrationSyncService()
     ) {
     }
 
@@ -127,6 +129,8 @@ private readonly FfeTournamentParser $parser =
                 }
             }
             $stats['groups'] = $this->grouping->rebuildUpcomingGroups();
+            $stats['registrations'] =
+    $this->registrations->refreshUpcomingRegistrations();
             $this->finishRun($runId, 'succeeded', $stats);
 
             return $stats;
@@ -178,6 +182,7 @@ private readonly FfeTournamentParser $parser =
                 tournaments_created = :created,
                 tournaments_updated = :updated,
                 tournaments_ignored = :ignored,
+                club_entries_updated = :club_entries_updated,
                 error_message = :error_message
              WHERE id = :id'
         );
@@ -188,6 +193,9 @@ private readonly FfeTournamentParser $parser =
             ':created' => $stats['created'],
             ':updated' => $stats['updated'],
             ':ignored' => $stats['ignored'],
+            ':club_entries_updated' => (int) (
+    $stats['registrations']['club_entries_updated'] ?? 0
+),
             ':error_message' => $errorMessage,
             ':id' => $runId,
         ]);
