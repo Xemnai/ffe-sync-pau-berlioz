@@ -9,17 +9,35 @@ use DateTimeImmutable;
 use DateTimeZone;
 use PauBerlioz\FfeSync\Database;
 use PDO;
-use RuntimeException;
 use Throwable;
 
 final class RouteDistanceSyncService
 {
+    private const CACHE_VERSION = 'v2';
+
     private const ORIGIN_QUERY =
-        'Cité des Pyrénées, 29 Bis Rue Berlioz, 64000 Pau, France';
+        'Club d’Echecs Pau Berlioz, Cité des Pyrénées, '
+        . '29 bis rue Berlioz, 64000 Pau, France';
+
+    private const ORIGIN_LABEL =
+        'Club d’Echecs Pau Berlioz — Cité des Pyrénées, Pau';
+
+    private const ORIGIN_LATITUDE = 43.3136579;
+
+    private const ORIGIN_LONGITUDE = -0.3456690;
 
     private const FAILURE_RETRY_INTERVAL = 'P1D';
 
     private const NOT_FOUND_RETRY_INTERVAL = 'P14D';
+
+    private const DEPARTMENTS = [
+        '31' => 'Haute-Garonne',
+        '32' => 'Gers',
+        '33' => 'Gironde',
+        '40' => 'Landes',
+        '64' => 'Pyrénées-Atlantiques',
+        '65' => 'Hautes-Pyrénées',
+    ];
 
     public function __construct(
         private readonly OpenRouteServiceClient $client =
@@ -50,19 +68,23 @@ final class RouteDistanceSyncService
             $stats['groups_checked']++;
 
             try {
-                [$primaryQuery, $fallbackQuery] =
-                    $this->buildDestinationQueries($group);
+                $queries = $this->buildDestinationQueries($group);
 
-                if ($primaryQuery === null) {
-                    $this->updateGroupDistance((int) $group['id'], null);
+                if ($queries['primary'] === null) {
+                    $this->updateGroupDistance(
+                        (int) $group['id'],
+                        null
+                    );
+
                     $stats['groups_without_location']++;
                     continue;
                 }
 
                 $result = $this->resolveDestinationRoute(
                     $origin,
-                    $primaryQuery,
-                    $fallbackQuery
+                    $queries['primary'],
+                    $queries['fallback'],
+                    $queries['expected_city']
                 );
 
                 if ($result['status'] === 'resolved') {
@@ -82,7 +104,10 @@ final class RouteDistanceSyncService
                     continue;
                 }
 
-                $this->updateGroupDistance((int) $group['id'], null);
+                $this->updateGroupDistance(
+                    (int) $group['id'],
+                    null
+                );
 
                 if ($result['status'] === 'deferred') {
                     $stats['groups_deferred']++;
@@ -90,7 +115,11 @@ final class RouteDistanceSyncService
                     $stats['groups_failed']++;
                 }
             } catch (Throwable $exception) {
-                $this->updateGroupDistance((int) $group['id'], null);
+                $this->updateGroupDistance(
+                    (int) $group['id'],
+                    null
+                );
+
                 $stats['groups_failed']++;
 
                 error_log(
@@ -108,103 +137,69 @@ final class RouteDistanceSyncService
 
     private function resolveOrigin(): array
     {
-        $cacheKey = hash('sha256', 'origin|' . self::ORIGIN_QUERY);
+        $cacheKey = hash(
+            'sha256',
+            implode(
+                "\n",
+                [
+                    self::CACHE_VERSION,
+                    'origin',
+                    self::ORIGIN_QUERY,
+                    (string) self::ORIGIN_LATITUDE,
+                    (string) self::ORIGIN_LONGITUDE,
+                ]
+            )
+        );
+
         $cached = $this->loadCache($cacheKey);
 
         if ($this->isResolvedLocation($cached)) {
             return $this->cacheLocationResult($cached);
         }
 
-        if ($this->isRetryDeferred($cached)) {
-            return ['status' => 'deferred'];
-        }
+        $this->saveCache([
+            'cache_key' => $cacheKey,
+            'cache_kind' => 'origin',
+            'primary_query' => self::ORIGIN_QUERY,
+            'fallback_query' => null,
+            'resolved_query' => 'Coordonnées fixes du club',
+            'resolved_label' => self::ORIGIN_LABEL,
+            'latitude' => self::ORIGIN_LATITUDE,
+            'longitude' => self::ORIGIN_LONGITUDE,
+            'distance_meters' => null,
+            'duration_seconds' => null,
+            'status' => 'resolved',
+            'error_message' => null,
+            'next_retry_at' => null,
+        ]);
 
-        try {
-            $location = $this->client->geocode(self::ORIGIN_QUERY);
-
-            if ($location === null) {
-                $this->saveCache([
-                    'cache_key' => $cacheKey,
-                    'cache_kind' => 'origin',
-                    'primary_query' => self::ORIGIN_QUERY,
-                    'fallback_query' => null,
-                    'resolved_query' => null,
-                    'resolved_label' => null,
-                    'latitude' => null,
-                    'longitude' => null,
-                    'distance_meters' => null,
-                    'duration_seconds' => null,
-                    'status' => 'not_found',
-                    'error_message' => 'Adresse de départ introuvable.',
-                    'next_retry_at' => $this->retryAt(
-                        self::NOT_FOUND_RETRY_INTERVAL
-                    ),
-                ]);
-
-                return ['status' => 'not_found'];
-            }
-
-            $result = [
-                'cache_key' => $cacheKey,
-                'cache_kind' => 'origin',
-                'primary_query' => self::ORIGIN_QUERY,
-                'fallback_query' => null,
-                'resolved_query' => self::ORIGIN_QUERY,
-                'resolved_label' => $location['label'],
-                'latitude' => $location['latitude'],
-                'longitude' => $location['longitude'],
-                'distance_meters' => null,
-                'duration_seconds' => null,
-                'status' => 'resolved',
-                'error_message' => null,
-                'next_retry_at' => null,
-            ];
-
-            $this->saveCache($result);
-
-            return [
-                'status' => 'resolved',
-                'latitude' => (float) $location['latitude'],
-                'longitude' => (float) $location['longitude'],
-            ];
-        } catch (Throwable $exception) {
-            $this->saveCache([
-                'cache_key' => $cacheKey,
-                'cache_kind' => 'origin',
-                'primary_query' => self::ORIGIN_QUERY,
-                'fallback_query' => null,
-                'resolved_query' => null,
-                'resolved_label' => null,
-                'latitude' => null,
-                'longitude' => null,
-                'distance_meters' => null,
-                'duration_seconds' => null,
-                'status' => 'failed',
-                'error_message' => $this->shortError($exception),
-                'next_retry_at' => $this->retryAt(
-                    self::FAILURE_RETRY_INTERVAL
-                ),
-            ]);
-
-            error_log(
-                '[FFE Distance] Origine Pau Berlioz : '
-                . $exception->getMessage()
-            );
-
-            return ['status' => 'failed'];
-        }
+        return [
+            'status' => 'resolved',
+            'latitude' => self::ORIGIN_LATITUDE,
+            'longitude' => self::ORIGIN_LONGITUDE,
+            'label' => self::ORIGIN_LABEL,
+        ];
     }
 
     private function resolveDestinationRoute(
         array $origin,
         string $primaryQuery,
-        ?string $fallbackQuery
+        ?string $fallbackQuery,
+        string $expectedCity
     ): array {
         $cacheKey = hash(
             'sha256',
             implode(
                 "\n",
-                ['destination', $primaryQuery, $fallbackQuery ?? '']
+                [
+                    self::CACHE_VERSION,
+                    'destination-route',
+                    (string) $origin['latitude'],
+                    (string) $origin['longitude'],
+                    $primaryQuery,
+                    $fallbackQuery ?? '',
+                    $expectedCity,
+                ]
             )
         );
 
@@ -223,26 +218,43 @@ final class RouteDistanceSyncService
         }
 
         if ($this->isRetryDeferred($cached)) {
-            return ['status' => 'deferred'];
+            return [
+                'status' => 'deferred',
+            ];
         }
 
         $location = null;
         $resolvedQuery = null;
 
-        if ($this->hasCoordinates($cached)) {
-            $location = $this->cacheLocation($cached);
-            $resolvedQuery = (string) ($cached['resolved_query'] ?? '');
-        }
-
         try {
-            if ($location === null) {
-                $location = $this->client->geocode($primaryQuery);
-                $resolvedQuery = $primaryQuery;
+            if ($this->hasCoordinates($cached)) {
+                $location = $this->cacheLocation($cached);
 
-                if ($location === null && $fallbackQuery !== null) {
-                    $location = $this->client->geocode($fallbackQuery);
-                    $resolvedQuery = $fallbackQuery;
-                }
+                $resolvedQuery = $this->nullableString(
+                    $cached['resolved_query'] ?? null
+                );
+            }
+
+            if ($location === null) {
+                $location = $this->findCandidateInExpectedCity(
+                    $primaryQuery,
+                    $expectedCity
+                );
+
+                $resolvedQuery = $location === null
+                    ? null
+                    : $primaryQuery;
+            }
+
+            if ($location === null && $fallbackQuery !== null) {
+                $location = $this->findCandidateInExpectedCity(
+                    $fallbackQuery,
+                    $expectedCity
+                );
+
+                $resolvedQuery = $location === null
+                    ? null
+                    : $fallbackQuery;
             }
 
             if ($location === null) {
@@ -258,13 +270,18 @@ final class RouteDistanceSyncService
                     'distance_meters' => null,
                     'duration_seconds' => null,
                     'status' => 'not_found',
-                    'error_message' => 'Lieu du tournoi introuvable.',
+                    'error_message' => sprintf(
+                        'Aucun résultat ORS validé pour la commune %s.',
+                        $expectedCity
+                    ),
                     'next_retry_at' => $this->retryAt(
                         self::NOT_FOUND_RETRY_INTERVAL
                     ),
                 ]);
 
-                return ['status' => 'not_found'];
+                return [
+                    'status' => 'not_found',
+                ];
             }
 
             $route = $this->client->drivingRoute(
@@ -314,8 +331,74 @@ final class RouteDistanceSyncService
                 ),
             ]);
 
-            throw $exception;
+            error_log(
+                '[FFE Distance] Destination : '
+                . $exception->getMessage()
+            );
+
+            return [
+                'status' => 'failed',
+            ];
         }
+    }
+
+    private function findCandidateInExpectedCity(
+        string $query,
+        string $expectedCity
+    ): ?array {
+        foreach ($this->client->geocodeCandidates($query) as $candidate) {
+            if (
+                $this->candidateMatchesExpectedCity(
+                    $candidate,
+                    $expectedCity
+                )
+            ) {
+                return $candidate;
+            }
+        }
+
+        return null;
+    }
+
+    private function candidateMatchesExpectedCity(
+        array $candidate,
+        string $expectedCity
+    ): bool {
+        $expected = $this->normalize($expectedCity);
+
+        if ($expected === '') {
+            return false;
+        }
+
+        foreach (
+            [
+                $candidate['locality'] ?? null,
+                $candidate['localadmin'] ?? null,
+                $candidate['city'] ?? null,
+                $candidate['municipality'] ?? null,
+            ] as $place
+        ) {
+            if (
+                is_string($place)
+                && $this->normalize($place) === $expected
+            ) {
+                return true;
+            }
+        }
+
+        $label = $candidate['label'] ?? null;
+
+        if (!is_string($label) || trim($label) === '') {
+            return false;
+        }
+
+        foreach (explode(',', $label) as $labelPart) {
+            if ($this->normalize($labelPart) === $expected) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function loadUpcomingGroups(): array
@@ -338,7 +421,9 @@ final class RouteDistanceSyncService
         $groups = $statement->fetchAll(PDO::FETCH_ASSOC);
 
         foreach ($groups as &$group) {
-            $group['sources'] = $this->loadGroupSources((int) $group['id']);
+            $group['sources'] = $this->loadGroupSources(
+                (int) $group['id']
+            );
         }
 
         unset($group);
@@ -370,27 +455,41 @@ final class RouteDistanceSyncService
     private function buildDestinationQueries(array $group): array
     {
         $city = trim((string) ($group['city'] ?? ''));
+
+        if ($city === '') {
+            return [
+                'primary' => null,
+                'fallback' => null,
+                'expected_city' => '',
+            ];
+        }
+
+        $department = trim((string) ($group['department'] ?? ''));
+
+        $departmentName = self::DEPARTMENTS[$department] ?? null;
+
         $place = $this->firstNonEmptyPlace(
             is_array($group['sources'] ?? null)
                 ? $group['sources']
                 : []
         );
 
-        if ($city === '') {
-            return [null, null];
-        }
-
-        $fallbackQuery = implode(', ', [$city, 'France']);
+        $cityQuery = $departmentName === null
+            ? sprintf('%s, France', $city)
+            : sprintf('%s, %s, France', $city, $departmentName);
 
         if ($place === null) {
-            return [$fallbackQuery, null];
+            return [
+                'primary' => $cityQuery,
+                'fallback' => null,
+                'expected_city' => $city,
+            ];
         }
 
-        $primaryQuery = implode(', ', [$place, $city, 'France']);
-
         return [
-            $primaryQuery,
-            $primaryQuery === $fallbackQuery ? null : $fallbackQuery,
+            'primary' => sprintf('%s, %s', $place, $cityQuery),
+            'fallback' => $cityQuery,
+            'expected_city' => $city,
         ];
     }
 
@@ -507,8 +606,10 @@ final class RouteDistanceSyncService
         ]);
     }
 
-    private function updateGroupDistance(int $groupId, ?float $distanceKm): void
-    {
+    private function updateGroupDistance(
+        int $groupId,
+        ?float $distanceKm
+    ): void {
         $statement = Database::connection()->prepare(
             'UPDATE pbe_event_groups
              SET distance_km = :distance_km
@@ -549,7 +650,9 @@ final class RouteDistanceSyncService
         return [
             'latitude' => (float) $cache['latitude'],
             'longitude' => (float) $cache['longitude'],
-            'label' => trim((string) ($cache['resolved_label'] ?? '')),
+            'label' => trim(
+                (string) ($cache['resolved_label'] ?? '')
+            ),
         ];
     }
 
@@ -568,27 +671,74 @@ final class RouteDistanceSyncService
             new DateTimeZone('UTC')
         );
 
-        $now = new DateTimeImmutable('now', new DateTimeZone('UTC'));
+        $now = new DateTimeImmutable(
+            'now',
+            new DateTimeZone('UTC')
+        );
 
         return $retryAt > $now;
     }
 
     private function retryAt(string $interval): string
     {
-        $now = new DateTimeImmutable('now', new DateTimeZone('UTC'));
+        $now = new DateTimeImmutable(
+            'now',
+            new DateTimeZone('UTC')
+        );
 
         return $now
             ->add(new DateInterval($interval))
             ->format('Y-m-d H:i:s');
     }
 
+    private function nullableString(mixed $value): ?string
+    {
+        if (!is_string($value)) {
+            return null;
+        }
+
+        $value = trim($value);
+
+        return $value === '' ? null : $value;
+    }
+
     private function shortError(Throwable $exception): string
     {
-        return mb_substr(
-            $exception->getMessage(),
-            0,
-            255,
-            'UTF-8'
+        $message = $exception->getMessage();
+
+        if (function_exists('mb_substr')) {
+            return mb_substr($message, 0, 255, 'UTF-8');
+        }
+
+        return substr($message, 0, 255);
+    }
+
+    private function normalize(string $value): string
+    {
+        $value = strtr(
+            $value,
+            [
+                'à' => 'a', 'á' => 'a', 'â' => 'a', 'ä' => 'a',
+                'ç' => 'c',
+                'è' => 'e', 'é' => 'e', 'ê' => 'e', 'ë' => 'e',
+                'î' => 'i', 'ï' => 'i',
+                'ô' => 'o', 'ö' => 'o',
+                'ù' => 'u', 'ú' => 'u', 'û' => 'u', 'ü' => 'u',
+                'ÿ' => 'y',
+                'À' => 'a', 'Á' => 'a', 'Â' => 'a', 'Ä' => 'a',
+                'Ç' => 'c',
+                'È' => 'e', 'É' => 'e', 'Ê' => 'e', 'Ë' => 'e',
+                'Î' => 'i', 'Ï' => 'i',
+                'Ô' => 'o', 'Ö' => 'o',
+                'Ù' => 'u', 'Ú' => 'u', 'Û' => 'u', 'Ü' => 'u',
+                'Ÿ' => 'y',
+            ]
+        );
+
+        $value = strtolower($value);
+
+        return trim(
+            preg_replace('/[^a-z0-9]+/u', ' ', $value) ?? $value
         );
     }
 }

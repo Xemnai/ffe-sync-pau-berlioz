@@ -11,15 +11,21 @@ final class OpenRouteServiceClient
 {
     private const BASE_URL = 'https://api.openrouteservice.org';
 
-    public function geocode(string $query): ?array
-    {
+    /**
+     * Retourne plusieurs candidats pour que le service appelant puisse
+     * vérifier que la commune correspond réellement à la ville FFE.
+     */
+    public function geocodeCandidates(
+        string $query,
+        int $limit = 10
+    ): array {
         $response = $this->requestJson(
             'GET',
             '/geocode/search?' . http_build_query(
                 [
                     'text' => $query,
                     'boundary.country' => 'FR',
-                    'size' => 1,
+                    'size' => max(1, min($limit, 10)),
                 ],
                 '',
                 '&',
@@ -27,32 +33,66 @@ final class OpenRouteServiceClient
             )
         );
 
-        $feature = $response['features'][0] ?? null;
+        $features = $response['features'] ?? [];
 
-        if (!is_array($feature)) {
-            return null;
+        if (!is_array($features)) {
+            return [];
         }
 
-        $coordinates = $feature['geometry']['coordinates'] ?? null;
+        $candidates = [];
 
-        if (
-            !is_array($coordinates)
-            || count($coordinates) < 2
-            || !is_numeric($coordinates[0])
-            || !is_numeric($coordinates[1])
-        ) {
-            return null;
+        foreach ($features as $feature) {
+            if (!is_array($feature)) {
+                continue;
+            }
+
+            $coordinates = $feature['geometry']['coordinates'] ?? null;
+
+            if (
+                !is_array($coordinates)
+                || count($coordinates) < 2
+                || !is_numeric($coordinates[0])
+                || !is_numeric($coordinates[1])
+            ) {
+                continue;
+            }
+
+            $properties = $feature['properties'] ?? [];
+
+            if (!is_array($properties)) {
+                $properties = [];
+            }
+
+            $label = $this->stringOrNull(
+                $properties['label'] ?? null
+            ) ?? $query;
+
+            $candidates[] = [
+                'longitude' => (float) $coordinates[0],
+                'latitude' => (float) $coordinates[1],
+                'label' => $label,
+                'locality' => $this->stringOrNull(
+                    $properties['locality'] ?? null
+                ),
+                'localadmin' => $this->stringOrNull(
+                    $properties['localadmin'] ?? null
+                ),
+                'city' => $this->stringOrNull(
+                    $properties['city'] ?? null
+                ),
+                'municipality' => $this->stringOrNull(
+                    $properties['municipality'] ?? null
+                ),
+                'county' => $this->stringOrNull(
+                    $properties['county'] ?? null
+                ),
+                'region' => $this->stringOrNull(
+                    $properties['region'] ?? null
+                ),
+            ];
         }
 
-        $label = $feature['properties']['label'] ?? $query;
-
-        return [
-            'longitude' => (float) $coordinates[0],
-            'latitude' => (float) $coordinates[1],
-            'label' => is_string($label) && trim($label) !== ''
-                ? trim($label)
-                : $query,
-        ];
+        return $candidates;
     }
 
     public function drivingRoute(
@@ -61,15 +101,23 @@ final class OpenRouteServiceClient
         float $endLongitude,
         float $endLatitude
     ): array {
-        $payload = json_encode(
-            [
-                'coordinates' => [
-                    [$startLongitude, $startLatitude],
-                    [$endLongitude, $endLatitude],
+        try {
+            $payload = json_encode(
+                [
+                    'coordinates' => [
+                        [$startLongitude, $startLatitude],
+                        [$endLongitude, $endLatitude],
+                    ],
                 ],
-            ],
-            JSON_THROW_ON_ERROR
-        );
+                JSON_THROW_ON_ERROR
+            );
+        } catch (JsonException $exception) {
+            throw new RuntimeException(
+                'Coordonnées d’itinéraire OpenRouteService invalides.',
+                0,
+                $exception
+            );
+        }
 
         $response = $this->requestJson(
             'POST',
@@ -92,8 +140,12 @@ final class OpenRouteServiceClient
         }
 
         return [
-            'distance_meters' => (int) round((float) $summary['distance']),
-            'duration_seconds' => (int) round((float) $summary['duration']),
+            'distance_meters' => (int) round(
+                (float) $summary['distance']
+            ),
+            'duration_seconds' => (int) round(
+                (float) $summary['duration']
+            ),
         ];
     }
 
@@ -214,5 +266,16 @@ final class OpenRouteServiceClient
         $apiKey = trim($value);
 
         return $apiKey;
+    }
+
+    private function stringOrNull(mixed $value): ?string
+    {
+        if (!is_string($value)) {
+            return null;
+        }
+
+        $value = trim($value);
+
+        return $value === '' ? null : $value;
     }
 }
