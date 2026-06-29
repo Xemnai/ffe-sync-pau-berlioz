@@ -34,6 +34,8 @@ private readonly FfeTournamentParser $parser =
             'updated' => 0,
             'ignored' => 0,
             'errors' => 0,
+            'selected_references' => [],
+            'failed_references' => [],
         ];
 
         try {
@@ -48,6 +50,7 @@ private readonly FfeTournamentParser $parser =
     ->extractUpcomingTournamentReferences($listingHtml);
 
             $stats['references_found'] = count($references);
+            $stats['selected_references'] = $references;
 
             $knownSources = $this->loadKnownSources($references);
 
@@ -107,7 +110,10 @@ private readonly FfeTournamentParser $parser =
                     }
                 } catch (Throwable $exception) {
                     $stats['errors']++;
-
+                    $stats['failed_references'][] = [
+                        'ffe_ref' => $reference,
+                        'error' => $exception->getMessage(),
+];
                     error_log(
                         sprintf(
                             '[FFE Sync] Ref %d : %s',

@@ -35,10 +35,6 @@ final class FfeTournamentListParser
         'dec' => 12,
     ];
 
-    /**
-     * Retourne uniquement les références FFE dont la date indiquée
-     * dans la liste départementale est aujourd'hui ou ultérieure.
-     */
     public function extractUpcomingTournamentReferences(string $html): array
     {
         if (!class_exists(DOMDocument::class)) {
@@ -50,12 +46,10 @@ final class FfeTournamentListParser
         try {
             $document = new DOMDocument();
 
-            $loaded = $document->loadHTML(
+            if (!$document->loadHTML(
                 '<?xml encoding="utf-8" ?>' . $html,
                 LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING
-            );
-
-            if (!$loaded) {
+            )) {
                 throw new RuntimeException(
                     'Impossible d’analyser la liste FFE.'
                 );
@@ -70,13 +64,13 @@ final class FfeTournamentListParser
                 );
             }
 
-            $currentYear = null;
-            $references = [];
-
             $today = new DateTimeImmutable(
                 'today',
                 new DateTimeZone('Europe/Paris')
             );
+
+            $currentYear = null;
+            $references = [];
 
             foreach ($rows as $row) {
                 $rowText = $this->cleanText($row->textContent ?? '');
@@ -84,7 +78,7 @@ final class FfeTournamentListParser
                 $heading = $this->extractMonthHeading($rowText);
 
                 if ($heading !== null) {
-                    $currentYear = $heading['year'];
+                    $currentYear = $heading;
                     continue;
                 }
 
@@ -125,7 +119,6 @@ final class FfeTournamentListParser
                     }
 
                     $reference = (int) $matches[1];
-
                     $references[$reference] = $reference;
                 }
             }
@@ -137,7 +130,7 @@ final class FfeTournamentListParser
         }
     }
 
-    private function extractMonthHeading(string $text): ?array
+    private function extractMonthHeading(string $text): ?int
     {
         if (
             preg_match(
@@ -153,9 +146,7 @@ final class FfeTournamentListParser
             return null;
         }
 
-        return [
-            'year' => (int) $matches[2],
-        ];
+        return (int) $matches[2];
     }
 
     private function extractRowDate(
@@ -204,23 +195,12 @@ final class FfeTournamentListParser
         $value = strtr(
             $value,
             [
-                'à' => 'a',
-                'á' => 'a',
-                'â' => 'a',
-                'ä' => 'a',
+                'à' => 'a', 'á' => 'a', 'â' => 'a', 'ä' => 'a',
                 'ç' => 'c',
-                'è' => 'e',
-                'é' => 'e',
-                'ê' => 'e',
-                'ë' => 'e',
-                'î' => 'i',
-                'ï' => 'i',
-                'ô' => 'o',
-                'ö' => 'o',
-                'ù' => 'u',
-                'ú' => 'u',
-                'û' => 'u',
-                'ü' => 'u',
+                'è' => 'e', 'é' => 'e', 'ê' => 'e', 'ë' => 'e',
+                'î' => 'i', 'ï' => 'i',
+                'ô' => 'o', 'ö' => 'o',
+                'ù' => 'u', 'ú' => 'u', 'û' => 'u', 'ü' => 'u',
             ]
         );
 
