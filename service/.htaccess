@@ -2,6 +2,6 @@ Options -Indexes
 
 DirectoryIndex index.php
 
-<FilesMatch "\.(env|log|sql|bak)$">
+<FilesMatch "^(bootstrap\.php|\.env|.*\.(log|sql|bak))$">
     Require all denied
 </FilesMatch>

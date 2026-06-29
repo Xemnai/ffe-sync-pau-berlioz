@@ -25,6 +25,74 @@ jobs:
       - name: Récupérer le code
         uses: actions/checkout@v4
 
+      - name: Générer la configuration privée
+        env:
+          FFE_DB_HOST: ${{ secrets.FFE_DB_HOST }}
+          FFE_DB_PORT: ${{ secrets.FFE_DB_PORT }}
+          FFE_DB_NAME: ${{ secrets.FFE_DB_NAME }}
+          FFE_DB_USERNAME: ${{ secrets.FFE_DB_USERNAME }}
+          FFE_DB_PASSWORD: ${{ secrets.FFE_DB_PASSWORD }}
+          PBE_WORDPRESS_TO_SERVICE_SECRET: ${{ secrets.PBE_WORDPRESS_TO_SERVICE_SECRET }}
+          PBE_SERVICE_TO_WORDPRESS_SECRET: ${{ secrets.PBE_SERVICE_TO_WORDPRESS_SECRET }}
+        run: |
+          python3 <<'PY'
+          import base64
+          import json
+          import os
+          from pathlib import Path
+
+          values = {
+              "FFE_DB_HOST": os.environ["FFE_DB_HOST"],
+              "FFE_DB_PORT": os.environ["FFE_DB_PORT"],
+              "FFE_DB_NAME": os.environ["FFE_DB_NAME"],
+              "FFE_DB_USERNAME": os.environ["FFE_DB_USERNAME"],
+              "FFE_DB_PASSWORD": os.environ["FFE_DB_PASSWORD"],
+              "PBE_WORDPRESS_TO_SERVICE_SECRET": os.environ["PBE_WORDPRESS_TO_SERVICE_SECRET"],
+              "PBE_SERVICE_TO_WORDPRESS_SECRET": os.environ["PBE_SERVICE_TO_WORDPRESS_SECRET"],
+          }
+
+          missing = [key for key, value in values.items() if not value]
+
+          if missing:
+              raise SystemExit(
+                  "Secrets GitHub manquants : " + ", ".join(missing)
+              )
+
+          config = {
+              "database": {
+                  "host": values["FFE_DB_HOST"],
+                  "port": int(values["FFE_DB_PORT"]),
+                  "name": values["FFE_DB_NAME"],
+                  "username": values["FFE_DB_USERNAME"],
+                  "password": values["FFE_DB_PASSWORD"],
+              },
+              "security": {
+                  "wordpress_to_service_secret": values["PBE_WORDPRESS_TO_SERVICE_SECRET"],
+                  "service_to_wordpress_secret": values["PBE_SERVICE_TO_WORDPRESS_SECRET"],
+              },
+          }
+
+          payload = json.dumps(config, ensure_ascii=False).encode("utf-8")
+          encoded = base64.b64encode(payload).decode("ascii")
+
+          php = f"""<?php
+
+          declare(strict_types=1);
+
+          return json_decode(
+              base64_decode('{encoded}', true),
+              true,
+              512,
+              JSON_THROW_ON_ERROR
+          );
+          """
+
+          output = Path(os.environ["RUNNER_TEMP"]) / "runtime.php"
+          output.write_text(php, encoding="utf-8")
+
+          print("Configuration privée générée.")
+          PY
+
       - name: Installer lftp
         run: |
           sudo apt-get update
@@ -37,6 +105,7 @@ jobs:
           SFTP_USER: ${{ secrets.OVH_SFTP_USERNAME }}
           SFTP_PASSWORD: ${{ secrets.OVH_SFTP_PASSWORD }}
           REMOTE_DIR: ${{ secrets.OVH_SFTP_REMOTE_DIR }}
+          PRIVATE_CONFIG_DIR: private/ffe-sync
         run: |
           lftp <<EOF
           set cmd:fail-exit true
@@ -46,14 +115,16 @@ jobs:
 
           open -u "$SFTP_USER","$SFTP_PASSWORD" sftp://$SFTP_HOST:$SFTP_PORT
 
-          mkdir -p $REMOTE_DIR
-
+          mkdir -p "$REMOTE_DIR"
           mirror -R \
             --delete \
             --verbose \
             --exclude-glob .git* \
             service/ \
-            $REMOTE_DIR
+            "$REMOTE_DIR"
+
+          mkdir -p "$PRIVATE_CONFIG_DIR"
+          put -O "$PRIVATE_CONFIG_DIR" "$RUNNER_TEMP/runtime.php"
 
           bye
           EOF
