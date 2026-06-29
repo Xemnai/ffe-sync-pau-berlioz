@@ -7,8 +7,6 @@ namespace PauBerlioz\FfeSync\Ffe;
 use DateTimeImmutable;
 use DateTimeZone;
 use RuntimeException;
-use DOMDocument;
-use DOMXPath;
 
 final class FfeTournamentParser
 {
@@ -26,6 +24,7 @@ final class FfeTournamentParser
         );
 
         $references = array_values(array_unique($references));
+
         sort($references);
 
         return $references;
@@ -48,8 +47,8 @@ final class FfeTournamentParser
 
         $cadence = $this->extractField($lines, 'Cadence');
         $announcement = $this->extractAnnouncement($lines);
-$address = $this->extractField($lines, 'Adresse')
-    ?? $this->extractStructuredField($html, 'Adresse');
+        $address = $this->extractField($lines, 'Adresse');
+
         $normalizedTitle = $this->normalize($title);
         $isExcluded = $this->isExcludedTitle($normalizedTitle);
 
@@ -59,44 +58,68 @@ $address = $this->extractField($lines, 'Adresse')
             'city' => $city,
             'title' => $title,
             'normalized_title' => $normalizedTitle,
+
             'ffe_url' => sprintf(
                 'https://www.echecs.asso.fr/FicheTournoi.aspx?Ref=%d',
                 $reference
             ),
-'results_url' => $this->extractRankingUrl($html)
-    ?? $this->buildRankingUrl($reference),
+
+            /*
+             * On utilise directement l'URL du classement.
+             * Si la FFE n'a pas encore publié de tableau, le parser
+             * des inscrits retournera simplement "unavailable".
+             */
+            'results_url' => $this->buildRankingUrl($reference),
+
             'start_date' => $startDate,
             'end_date' => $endDate,
+
             'rounds' => $this->extractIntegerField(
                 $this->extractField($lines, 'Nombre de rondes')
             ),
+
             'cadence' => $cadence,
-            'cadence_kind' => $this->classifyCadence(
-                $title,
-                $cadence
-            ),
-         'venue' => $address,
-'address' => $address,
+            'cadence_kind' => $this->classifyCadence($title, $cadence),
+
+            'venue' => $address,
+            'address' => $address,
+
             'organizer' => $this->extractField($lines, 'Organisateur'),
             'arbiter' => $this->extractField($lines, 'Arbitre'),
             'contact' => $this->extractField($lines, 'Contact'),
+
             'fee_senior' => $this->extractField(
                 $lines,
                 'Inscription Senior'
             ),
+
             'fee_youth' => $this->extractField(
                 $lines,
                 'Inscription Jeunes'
             ),
+
             'announcement' => $announcement,
+
             'registration_url' => $this->extractRegistrationUrl(
-                $announcement
+                $announcement,
+                $html
             ),
+
             'is_excluded' => $isExcluded,
+
             'exclusion_reason' => $isExcluded
                 ? 'Titre scolaire, collège, interne ou individuel.'
                 : null,
         ];
+    }
+
+    private function buildRankingUrl(int $reference): string
+    {
+        return sprintf(
+            'https://www.echecs.asso.fr/Resultats.aspx?Action=Cl&URL=Tournois%%2FId%%2F%d%%2F%d',
+            $reference,
+            $reference
+        );
     }
 
     private function extractLines(string $html): array
@@ -113,7 +136,11 @@ $address = $this->extractField($lines, 'Adresse')
             'UTF-8'
         );
 
-        $text = str_replace(["\xc2\xa0", "\r"], [' ', ''], $text);
+        $text = str_replace(
+            ["\xc2\xa0", "\r"],
+            [' ', ''],
+            $text
+        );
 
         $lines = preg_split('/\n+/u', $text) ?: [];
 
@@ -146,7 +173,10 @@ $address = $this->extractField($lines, 'Adresse')
                     break;
                 }
 
-                return [$title, trim($matches[1])];
+                return [
+                    $title,
+                    trim($matches[1]),
+                ];
             }
         }
 
@@ -168,8 +198,10 @@ $address = $this->extractField($lines, 'Adresse')
         return null;
     }
 
-    private function extractField(array $lines, string $label): ?string
-    {
+    private function extractField(
+        array $lines,
+        string $label
+    ): ?string {
         $pattern = '/^' . preg_quote($label, '/') . '\s*:\s*(.*)$/iu';
 
         foreach ($lines as $index => $line) {
@@ -197,8 +229,11 @@ $address = $this->extractField($lines, 'Adresse')
     {
         foreach ($lines as $index => $line) {
             if (
-                preg_match('/^Annonce\s*:\s*(.*)$/iu', $line, $matches)
-                !== 1
+                preg_match(
+                    '/^Annonce\s*:\s*(.*)$/iu',
+                    $line,
+                    $matches
+                ) !== 1
             ) {
                 continue;
             }
@@ -360,25 +395,47 @@ $address = $this->extractField($lines, 'Adresse')
         return 'inconnu';
     }
 
-    private function extractRegistrationUrl(?string $announcement): ?string
-    {
-        if ($announcement === null) {
-            return null;
+    private function extractRegistrationUrl(
+        ?string $announcement,
+        string $html
+    ): ?string {
+        $urls = [];
+
+        if ($announcement !== null) {
+            preg_match_all(
+                '~https?://[^\s<>"\]]+~iu',
+                $announcement,
+                $matches
+            );
+
+            foreach ($matches[0] ?? [] as $url) {
+                $urls[] = $url;
+            }
         }
 
         preg_match_all(
-            '~https?://[^\s<>"\]]+~iu',
-            $announcement,
+            '~href\s*=\s*["\'](https?://[^"\']+)["\']~iu',
+            $html,
             $matches
         );
 
-        foreach ($matches[0] ?? [] as $url) {
+        foreach ($matches[1] ?? [] as $url) {
+            $urls[] = html_entity_decode(
+                $url,
+                ENT_QUOTES | ENT_HTML5,
+                'UTF-8'
+            );
+        }
+
+        foreach (array_unique($urls) as $url) {
             $url = rtrim($url, ".,;:)]}");
 
+            $lowerUrl = strtolower($url);
+
             if (
-                str_contains(strtolower($url), 'helloasso')
-                || str_contains(strtolower($url), 'billetweb')
-                || str_contains(strtolower($url), 'weezevent')
+                str_contains($lowerUrl, 'helloasso')
+                || str_contains($lowerUrl, 'billetweb')
+                || str_contains($lowerUrl, 'weezevent')
             ) {
                 return $url;
             }
@@ -423,128 +480,4 @@ $address = $this->extractField($lines, 'Adresse')
             preg_replace('/[^a-z0-9]+/u', ' ', $value) ?? $value
         );
     }
-
-    private function extractRankingUrl(string $html): ?string
-{
-    if (
-        preg_match(
-            '~href\s*=\s*["\']([^"\']*Resultats\.aspx\?[^"\']*Action=Cl[^"\']*)["\']~iu',
-            $html,
-            $matches
-        ) !== 1
-    ) {
-        return null;
-    }
-
-    $url = html_entity_decode(
-        $matches[1],
-        ENT_QUOTES | ENT_HTML5,
-        'UTF-8'
-    );
-
-    if (
-        str_starts_with($url, 'https://')
-        || str_starts_with($url, 'http://')
-    ) {
-        return $url;
-    }
-
-    return 'https://www.echecs.asso.fr/' . ltrim($url, '/');
-}
-
-private function buildRankingUrl(int $reference): string
-{
-    return sprintf(
-        'https://www.echecs.asso.fr/Resultats.aspx?Action=Cl&URL=Tournois%%2FId%%2F%d%%2F%d',
-        $reference,
-        $reference
-    );
-}
-
-private function buildRankingUrl(int $reference): string
-{
-    return sprintf(
-        'https://www.echecs.asso.fr/Resultats.aspx?Action=Cl&URL=Tournois%%2FId%%2F%d%%2F%d',
-        $reference,
-        $reference
-    );
-}
-
-private function extractStructuredField(
-    string $html,
-    string $label
-): ?string {
-    $previousErrorsState = libxml_use_internal_errors(true);
-
-    try {
-        $document = new DOMDocument();
-
-        if (!$document->loadHTML(
-            '<?xml encoding="utf-8" ?>' . $html,
-            LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING
-        )) {
-            return null;
-        }
-
-        $xpath = new DOMXPath($document);
-
-        $nodes = $xpath->query('//td|//th|//div|//p|//span');
-
-        if ($nodes === false) {
-            return null;
-        }
-
-        $pattern = '/^'
-            . preg_quote($label, '/')
-            . '\s*:\s*(.+)$/iu';
-
-        foreach ($nodes as $node) {
-            $text = trim(
-                preg_replace(
-                    '/\s+/u',
-                    ' ',
-                    $node->textContent ?? ''
-                ) ?? ''
-            );
-
-            if ($text === '') {
-                continue;
-            }
-
-            if (
-                preg_match($pattern, $text, $matches) === 1
-                && trim($matches[1]) !== ''
-            ) {
-                return trim($matches[1]);
-            }
-
-            if ($this->normalize($text) !== $this->normalize($label)) {
-                continue;
-            }
-
-            for (
-                $sibling = $node->nextSibling;
-                $sibling !== null;
-                $sibling = $sibling->nextSibling
-            ) {
-                $value = trim(
-                    preg_replace(
-                        '/\s+/u',
-                        ' ',
-                        $sibling->textContent ?? ''
-                    ) ?? ''
-                );
-
-                if ($value !== '') {
-                    return $value;
-                }
-            }
-        }
-
-        return null;
-    } finally {
-        libxml_clear_errors();
-        libxml_use_internal_errors($previousErrorsState);
-    }
-}
 }
