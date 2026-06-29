@@ -7,6 +7,7 @@ on:
     paths:
       - "service/**"
       - ".github/workflows/deploy-phelipot-service.yml"
+      - ".github/workflows/manual-import-ffe.yml"
 
   workflow_dispatch:
 
@@ -19,11 +20,19 @@ concurrency:
 
 jobs:
   deploy:
+    name: Déployer le service
     runs-on: ubuntu-latest
 
     steps:
       - name: Récupérer le code
         uses: actions/checkout@v4
+
+      - name: Vérifier la syntaxe PHP
+        run: |
+          set -euo pipefail
+
+          find service -type f -name '*.php' -print0 \
+            | xargs -0 -r -n1 php -l
 
       - name: Générer la configuration privée
         env:
@@ -34,8 +43,11 @@ jobs:
           FFE_DB_PASSWORD: ${{ secrets.FFE_DB_PASSWORD }}
           PBE_WORDPRESS_TO_SERVICE_SECRET: ${{ secrets.PBE_WORDPRESS_TO_SERVICE_SECRET }}
           PBE_SERVICE_TO_WORDPRESS_SECRET: ${{ secrets.PBE_SERVICE_TO_WORDPRESS_SECRET }}
+          ORS_API_KEY: ${{ secrets.ORS_API_KEY }}
         run: |
-          python3 <<'PY'
+          set -euo pipefail
+
+          python3 - <<'PY'
           import base64
           import json
           import os
@@ -47,15 +59,25 @@ jobs:
               "FFE_DB_NAME": os.environ["FFE_DB_NAME"],
               "FFE_DB_USERNAME": os.environ["FFE_DB_USERNAME"],
               "FFE_DB_PASSWORD": os.environ["FFE_DB_PASSWORD"],
-              "PBE_WORDPRESS_TO_SERVICE_SECRET": os.environ["PBE_WORDPRESS_TO_SERVICE_SECRET"],
-              "PBE_SERVICE_TO_WORDPRESS_SECRET": os.environ["PBE_SERVICE_TO_WORDPRESS_SECRET"],
+              "PBE_WORDPRESS_TO_SERVICE_SECRET": os.environ[
+                  "PBE_WORDPRESS_TO_SERVICE_SECRET"
+              ],
+              "PBE_SERVICE_TO_WORDPRESS_SECRET": os.environ[
+                  "PBE_SERVICE_TO_WORDPRESS_SECRET"
+              ],
+              "ORS_API_KEY": os.environ["ORS_API_KEY"],
           }
 
-          missing = [key for key, value in values.items() if not value]
+          missing = [
+              key
+              for key, value in values.items()
+              if not value
+          ]
 
           if missing:
               raise SystemExit(
-                  "Secrets GitHub manquants : " + ", ".join(missing)
+                  "Secrets GitHub manquants : "
+                  + ", ".join(missing)
               )
 
           config = {
@@ -67,17 +89,32 @@ jobs:
                   "password": values["FFE_DB_PASSWORD"],
               },
               "security": {
-                  "wordpress_to_service_secret": values["PBE_WORDPRESS_TO_SERVICE_SECRET"],
-                  "service_to_wordpress_secret": values["PBE_SERVICE_TO_WORDPRESS_SECRET"],
+                  "wordpress_to_service_secret": values[
+                      "PBE_WORDPRESS_TO_SERVICE_SECRET"
+                  ],
+                  "service_to_wordpress_secret": values[
+                      "PBE_SERVICE_TO_WORDPRESS_SECRET"
+                  ],
+              },
+              "openrouteservice": {
+                  "api_key": values["ORS_API_KEY"],
               },
           }
 
-          payload = json.dumps(config, ensure_ascii=False).encode("utf-8")
+          payload = json.dumps(
+              config,
+              ensure_ascii=False
+          ).encode("utf-8")
+
           encoded = base64.b64encode(payload).decode("ascii")
 
           php = f"""<?php
-
           declare(strict_types=1);
+
+          if (!defined('PBE_FFE_SYNC_BOOTSTRAPPED')) {{
+              http_response_code(404);
+              exit;
+          }}
 
           return json_decode(
               base64_decode('{encoded}', true),
@@ -95,6 +132,8 @@ jobs:
 
       - name: Installer lftp
         run: |
+          set -euo pipefail
+
           sudo apt-get update
           sudo apt-get install -y lftp
 
@@ -106,6 +145,8 @@ jobs:
           SFTP_PASSWORD: ${{ secrets.OVH_SFTP_PASSWORD }}
           REMOTE_DIR: ${{ secrets.OVH_SFTP_REMOTE_DIR }}
         run: |
+          set -euo pipefail
+
           lftp <<EOF
           set cmd:fail-exit true
           set net:max-retries 2
@@ -125,3 +166,9 @@ jobs:
 
           bye
           EOF
+
+  import_ffe:
+    name: Import FFE après déploiement
+    needs: deploy
+    uses: ./.github/workflows/manual-import-ffe.yml
+    secrets: inherit
