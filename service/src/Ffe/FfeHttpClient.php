@@ -11,65 +11,79 @@ final class FfeHttpClient
     private float $lastRequestAt = 0.0;
 
     public function __construct(
-        private readonly int $minimumDelayMicroseconds = 400000,
-        private readonly int $connectTimeoutSeconds = 8,
-        private readonly int $timeoutSeconds = 12
+        private readonly int $minimumDelayMicroseconds = 500000,
+        private readonly int $connectTimeoutSeconds = 10,
+        private readonly int $timeoutSeconds = 20,
+        private readonly int $maximumAttempts = 2
     ) {
     }
 
     public function get(string $url): string
     {
-        if (!function_exists('curl_init')) {
-            throw new RuntimeException('Extension cURL indisponible.');
-        }
+        $lastError = 'Erreur HTTP FFE inconnue.';
 
-        $this->respectRateLimit();
+        for ($attempt = 1; $attempt <= $this->maximumAttempts; $attempt++) {
+            $this->respectRateLimit();
 
-        $curl = curl_init($url);
+            $curl = curl_init($url);
 
-        if ($curl === false) {
-            throw new RuntimeException('Impossible d’initialiser cURL.');
-        }
+            if ($curl === false) {
+                throw new RuntimeException(
+                    'Impossible d’initialiser cURL.'
+                );
+            }
 
-        curl_setopt_array(
-            $curl,
-            [
-                CURLOPT_RETURNTRANSFER => true,
-                CURLOPT_FOLLOWLOCATION => true,
-                CURLOPT_MAXREDIRS => 3,
-                CURLOPT_CONNECTTIMEOUT => $this->connectTimeoutSeconds,
-                CURLOPT_TIMEOUT => $this->timeoutSeconds,
-                CURLOPT_ENCODING => '',
-                CURLOPT_USERAGENT => 'PauBerliozFfeSync/0.2',
-                CURLOPT_SSL_VERIFYPEER => true,
-                CURLOPT_SSL_VERIFYHOST => 2,
-            ]
-        );
-
-        $response = curl_exec($curl);
-        $error = curl_error($curl);
-        $statusCode = (int) curl_getinfo(
-            $curl,
-            CURLINFO_RESPONSE_CODE
-        );
-
-        curl_close($curl);
-
-        $this->lastRequestAt = microtime(true);
-
-        if ($response === false) {
-            throw new RuntimeException(
-                'Erreur HTTP FFE : ' . ($error !== '' ? $error : 'inconnue')
+            curl_setopt_array(
+                $curl,
+                [
+                    CURLOPT_RETURNTRANSFER => true,
+                    CURLOPT_FOLLOWLOCATION => true,
+                    CURLOPT_MAXREDIRS => 3,
+                    CURLOPT_CONNECTTIMEOUT => $this->connectTimeoutSeconds,
+                    CURLOPT_TIMEOUT => $this->timeoutSeconds,
+                    CURLOPT_ENCODING => '',
+                    CURLOPT_USERAGENT => 'PauBerliozFfeSync/0.4',
+                    CURLOPT_SSL_VERIFYPEER => true,
+                    CURLOPT_SSL_VERIFYHOST => 2,
+                ]
             );
-        }
 
-        if ($statusCode !== 200) {
-            throw new RuntimeException(
-                sprintf('Réponse FFE inattendue : HTTP %d.', $statusCode)
+            $response = curl_exec($curl);
+
+            $error = curl_error($curl);
+
+            $statusCode = (int) curl_getinfo(
+                $curl,
+                CURLINFO_RESPONSE_CODE
             );
+
+            curl_close($curl);
+
+            $this->lastRequestAt = microtime(true);
+
+            if ($response !== false && $statusCode === 200) {
+                return $response;
+            }
+
+            $lastError = $response === false
+                ? ($error !== '' ? $error : 'Erreur HTTP inconnue.')
+                : sprintf(
+                    'Réponse FFE inattendue : HTTP %d.',
+                    $statusCode
+                );
+
+            if ($attempt < $this->maximumAttempts) {
+                usleep(1_000_000);
+            }
         }
 
-        return $response;
+        throw new RuntimeException(
+            sprintf(
+                'FFE indisponible après %d tentative(s) : %s',
+                $this->maximumAttempts,
+                $lastError
+            )
+        );
     }
 
     private function respectRateLimit(): void

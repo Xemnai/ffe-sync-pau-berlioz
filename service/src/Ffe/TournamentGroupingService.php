@@ -70,7 +70,7 @@ final class TournamentGroupingService
                     $singleTournamentGroups++;
                 }
             }
-
+$this->deleteOrphanGroups($connection);
             $connection->commit();
 
             return [
@@ -112,20 +112,18 @@ final class TournamentGroupingService
         return $statement->fetchAll(PDO::FETCH_ASSOC);
     }
 
-    private function buildGroupKey(array $source): string
-    {
-        $parts = [
-            $this->familyTitle((string) $source['title']),
-            $this->normalize((string) $source['department']),
-            $this->normalize((string) $source['city']),
-            (string) $source['start_date'],
-            (string) $source['end_date'],
-            $this->normalize((string) ($source['organizer'] ?? '')),
-            $this->normalize((string) ($source['venue'] ?? '')),
-        ];
+private function buildGroupKey(array $source): string
+{
+    $parts = [
+        $this->familyTitle((string) $source['title']),
+        $this->normalize((string) $source['department']),
+        $this->normalize((string) $source['city']),
+        (string) $source['start_date'],
+        (string) $source['end_date'],
+    ];
 
-        return hash('sha256', implode('|', $parts));
-    }
+    return hash('sha256', implode('|', $parts));
+}
 
     private function buildGroupTitle(array $sources): string
     {
@@ -378,4 +376,16 @@ final class TournamentGroupingService
             preg_replace('/[^a-z0-9]+/u', ' ', $value) ?? $value
         );
     }
+
+    private function deleteOrphanGroups(PDO $connection): void
+{
+    $connection->exec(
+        'DELETE g
+         FROM pbe_event_groups g
+         LEFT JOIN pbe_event_group_sources egs
+             ON egs.group_id = g.id
+         WHERE egs.group_id IS NULL
+           AND g.wp_event_id IS NULL'
+    );
+}
 }
