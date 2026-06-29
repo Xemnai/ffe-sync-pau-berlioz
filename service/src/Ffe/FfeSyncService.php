@@ -9,6 +9,7 @@ use DateTimeZone;
 use PauBerlioz\FfeSync\Database;
 use PDO;
 use Throwable;
+use PauBerlioz\FfeSync\Geo\RouteDistanceSyncService;
 
 final class FfeSyncService
 {
@@ -42,6 +43,7 @@ final class FfeSyncService
             'failed_references' => [],
             'groups' => null,
             'registrations' => null,
+            'distances' => null,
         ];
 
         try {
@@ -136,6 +138,21 @@ final class FfeSyncService
                 new TournamentGroupingService()
             )->rebuildUpcomingGroups();
 
+            try {
+    $stats['distances'] = (
+        new RouteDistanceSyncService()
+    )->refreshUpcomingGroupDistances();
+} catch (Throwable $exception) {
+    $stats['distances'] = [
+        'origin_status' => 'failed',
+        'error' => $exception->getMessage(),
+    ];
+
+    error_log(
+        '[FFE Distance] Service indisponible : '
+        . $exception->getMessage()
+    );
+}
             /*
              * Cette instanciation est volontairement faite ici :
              * si un problème subsiste dans la partie inscriptions,

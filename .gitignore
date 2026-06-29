@@ -7,3 +7,4 @@ vendor/
 /service/config/runtime.php
 /service/var/*
 !/service/var/.gitkeep
+/service/config/ors-runtime.php
