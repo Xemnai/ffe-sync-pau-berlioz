@@ -17,7 +17,9 @@ private readonly FfeHttpClient $http = new FfeHttpClient(),
 private readonly FfeTournamentListParser $listParser =
     new FfeTournamentListParser(),
 private readonly FfeTournamentParser $parser =
-    new FfeTournamentParser()
+    new FfeTournamentParser(),
+    private readonly TournamentGroupingService $grouping =
+    new TournamentGroupingService()
     ) {
     }
 
@@ -114,6 +116,7 @@ private readonly FfeTournamentParser $parser =
                         'ffe_ref' => $reference,
                         'error' => $exception->getMessage(),
 ];
+
                     error_log(
                         sprintf(
                             '[FFE Sync] Ref %d : %s',
@@ -123,7 +126,7 @@ private readonly FfeTournamentParser $parser =
                     );
                 }
             }
-
+            $stats['groups'] = $this->grouping->rebuildUpcomingGroups();
             $this->finishRun($runId, 'succeeded', $stats);
 
             return $stats;
