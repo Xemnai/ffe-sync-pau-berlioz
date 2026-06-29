@@ -181,33 +181,35 @@ final class OpenRouteServiceClient
         return $decoded;
     }
 
-    private function apiKey(): string
-    {
-        static $apiKey = null;
+private function apiKey(): string
+{
+    static $apiKey = null;
 
-        if (is_string($apiKey)) {
-            return $apiKey;
-        }
-
-        $configPath = dirname(__DIR__, 2)
-            . '/config/ors-runtime.php';
-
-        if (!is_file($configPath)) {
-            throw new RuntimeException(
-                'Configuration OpenRouteService absente.'
-            );
-        }
-
-        $value = require $configPath;
-
-        if (!is_string($value) || trim($value) === '') {
-            throw new RuntimeException(
-                'Clé OpenRouteService absente.'
-            );
-        }
-
-        $apiKey = trim($value);
-
+    if (is_string($apiKey)) {
         return $apiKey;
     }
+
+    $configPath = dirname(__DIR__, 2)
+        . '/config/runtime.php';
+
+    if (!is_file($configPath)) {
+        throw new RuntimeException(
+            'Configuration du service absente.'
+        );
+    }
+
+    $config = require $configPath;
+
+    $value = $config['openrouteservice']['api_key'] ?? null;
+
+    if (!is_string($value) || trim($value) === '') {
+        throw new RuntimeException(
+            'Clé OpenRouteService absente.'
+        );
+    }
+
+    $apiKey = trim($value);
+
+    return $apiKey;
+}
 }
