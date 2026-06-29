@@ -3,3 +3,7 @@ config.local.php
 vendor/
 .idea/
 .vscode/
+
+/service/config/runtime.php
+/service/var/*
+!/service/var/.gitkeep

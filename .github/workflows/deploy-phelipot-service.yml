@@ -1,0 +1,59 @@
+name: Déployer le service FFE sur Phelipot
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "service/**"
+      - ".github/workflows/deploy-phelipot-service.yml"
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-phelipot-ffe-service
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Récupérer le code
+        uses: actions/checkout@v4
+
+      - name: Installer lftp
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lftp
+
+      - name: Déployer par SFTP sur OVH
+        env:
+          SFTP_HOST: ${{ secrets.OVH_SFTP_HOST }}
+          SFTP_PORT: ${{ secrets.OVH_SFTP_PORT }}
+          SFTP_USER: ${{ secrets.OVH_SFTP_USERNAME }}
+          SFTP_PASSWORD: ${{ secrets.OVH_SFTP_PASSWORD }}
+          REMOTE_DIR: ${{ secrets.OVH_SFTP_REMOTE_DIR }}
+        run: |
+          lftp <<EOF
+          set cmd:fail-exit true
+          set net:max-retries 2
+          set net:timeout 30
+          set sftp:auto-confirm yes
+
+          open -u "$SFTP_USER","$SFTP_PASSWORD" sftp://$SFTP_HOST:$SFTP_PORT
+
+          mkdir -p $REMOTE_DIR
+
+          mirror -R \
+            --delete \
+            --verbose \
+            --exclude-glob .git* \
+            service/ \
+            $REMOTE_DIR
+
+          bye
+          EOF
