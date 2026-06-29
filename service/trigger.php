@@ -20,10 +20,15 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
     exit;
 }
 
+$stage = 'request_received';
+
 try {
     $body = file_get_contents('php://input') ?: '';
 
+    $stage = 'authentication';
     SignedRequestAuthenticator::verify($body);
+
+    $stage = 'payload_decoding';
 
     $payload = json_decode(
         $body,
@@ -44,7 +49,11 @@ try {
         exit;
     }
 
-    $result = (new FfeSyncService())->syncDepartment(
+    $stage = 'service_construction';
+    $service = new FfeSyncService();
+
+    $stage = 'synchronization';
+    $result = $service->syncDepartment(
         $department,
         'manual'
     );
@@ -64,12 +73,23 @@ try {
     ]);
 } catch (Throwable $exception) {
     error_log(
-        '[FFE Sync Trigger] ' . $exception->getMessage()
+        sprintf(
+            '[FFE Sync Trigger] Stage=%s | %s: %s',
+            $stage,
+            $exception::class,
+            $exception->getMessage()
+        )
     );
 
     http_response_code(500);
 
-    echo json_encode([
-        'error' => 'sync_failed',
-    ]);
+    echo json_encode(
+        [
+            'error' => 'sync_failed',
+            'stage' => $stage,
+            'exception' => $exception::class,
+            'message' => $exception->getMessage(),
+        ],
+        JSON_UNESCAPED_UNICODE
+    );
 }
