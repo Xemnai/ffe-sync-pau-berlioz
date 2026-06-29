@@ -451,4 +451,100 @@ $address = $this->extractField($lines, 'Adresse')
 
     return 'https://www.echecs.asso.fr/' . ltrim($url, '/');
 }
+
+private function buildRankingUrl(int $reference): string
+{
+    return sprintf(
+        'https://www.echecs.asso.fr/Resultats.aspx?Action=Cl&URL=Tournois%%2FId%%2F%d%%2F%d',
+        $reference,
+        $reference
+    );
+}
+
+private function buildRankingUrl(int $reference): string
+{
+    return sprintf(
+        'https://www.echecs.asso.fr/Resultats.aspx?Action=Cl&URL=Tournois%%2FId%%2F%d%%2F%d',
+        $reference,
+        $reference
+    );
+}
+
+private function extractStructuredField(
+    string $html,
+    string $label
+): ?string {
+    $previousErrorsState = libxml_use_internal_errors(true);
+
+    try {
+        $document = new DOMDocument();
+
+        if (!$document->loadHTML(
+            '<?xml encoding="utf-8" ?>' . $html,
+            LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING
+        )) {
+            return null;
+        }
+
+        $xpath = new DOMXPath($document);
+
+        $nodes = $xpath->query('//td|//th|//div|//p|//span');
+
+        if ($nodes === false) {
+            return null;
+        }
+
+        $pattern = '/^'
+            . preg_quote($label, '/')
+            . '\s*:\s*(.+)$/iu';
+
+        foreach ($nodes as $node) {
+            $text = trim(
+                preg_replace(
+                    '/\s+/u',
+                    ' ',
+                    $node->textContent ?? ''
+                ) ?? ''
+            );
+
+            if ($text === '') {
+                continue;
+            }
+
+            if (
+                preg_match($pattern, $text, $matches) === 1
+                && trim($matches[1]) !== ''
+            ) {
+                return trim($matches[1]);
+            }
+
+            if ($this->normalize($text) !== $this->normalize($label)) {
+                continue;
+            }
+
+            for (
+                $sibling = $node->nextSibling;
+                $sibling !== null;
+                $sibling = $sibling->nextSibling
+            ) {
+                $value = trim(
+                    preg_replace(
+                        '/\s+/u',
+                        ' ',
+                        $sibling->textContent ?? ''
+                    ) ?? ''
+                );
+
+                if ($value !== '') {
+                    return $value;
+                }
+            }
+        }
+
+        return null;
+    } finally {
+        libxml_clear_errors();
+        libxml_use_internal_errors($previousErrorsState);
+    }
+}
 }
