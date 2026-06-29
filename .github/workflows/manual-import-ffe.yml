@@ -31,6 +31,8 @@ jobs:
           )"
 
           curl \
+            --connect-timeout 15 \
+            --max-time 90 \
             --fail-with-body \
             --request POST \
             --header "Content-Type: application/json" \

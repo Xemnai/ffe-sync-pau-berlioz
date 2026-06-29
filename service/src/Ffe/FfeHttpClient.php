@@ -11,7 +11,9 @@ final class FfeHttpClient
     private float $lastRequestAt = 0.0;
 
     public function __construct(
-        private readonly int $minimumDelayMicroseconds = 350000
+        private readonly int $minimumDelayMicroseconds = 400000,
+        private readonly int $connectTimeoutSeconds = 8,
+        private readonly int $timeoutSeconds = 12
     ) {
     }
 
@@ -35,10 +37,10 @@ final class FfeHttpClient
                 CURLOPT_RETURNTRANSFER => true,
                 CURLOPT_FOLLOWLOCATION => true,
                 CURLOPT_MAXREDIRS => 3,
-                CURLOPT_CONNECTTIMEOUT => 15,
-                CURLOPT_TIMEOUT => 30,
+                CURLOPT_CONNECTTIMEOUT => $this->connectTimeoutSeconds,
+                CURLOPT_TIMEOUT => $this->timeoutSeconds,
                 CURLOPT_ENCODING => '',
-                CURLOPT_USERAGENT => 'PauBerliozFfeSync/0.1',
+                CURLOPT_USERAGENT => 'PauBerliozFfeSync/0.2',
                 CURLOPT_SSL_VERIFYPEER => true,
                 CURLOPT_SSL_VERIFYHOST => 2,
             ]
@@ -46,7 +48,10 @@ final class FfeHttpClient
 
         $response = curl_exec($curl);
         $error = curl_error($curl);
-        $statusCode = (int) curl_getinfo($curl, CURLINFO_RESPONSE_CODE);
+        $statusCode = (int) curl_getinfo(
+            $curl,
+            CURLINFO_RESPONSE_CODE
+        );
 
         curl_close($curl);
 

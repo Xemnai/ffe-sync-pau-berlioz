@@ -13,8 +13,11 @@ use Throwable;
 final class FfeSyncService
 {
     public function __construct(
-        private readonly FfeHttpClient $http = new FfeHttpClient(),
-        private readonly FfeTournamentParser $parser = new FfeTournamentParser()
+private readonly FfeHttpClient $http = new FfeHttpClient(),
+private readonly FfeTournamentListParser $listParser =
+    new FfeTournamentListParser(),
+private readonly FfeTournamentParser $parser =
+    new FfeTournamentParser()
     ) {
     }
 
@@ -41,9 +44,8 @@ final class FfeSyncService
 
             $listingHtml = $this->http->get($listingUrl);
 
-            $references = $this->parser->extractTournamentReferences(
-                $listingHtml
-            );
+    $references = $this->listParser
+    ->extractUpcomingTournamentReferences($listingHtml);
 
             $stats['references_found'] = count($references);
 
