@@ -12,17 +12,17 @@ use Throwable;
 
 final class FfeSyncService
 {
-    public function __construct(
-private readonly FfeHttpClient $http = new FfeHttpClient(),
-private readonly FfeTournamentListParser $listParser =
-    new FfeTournamentListParser(),
-private readonly FfeTournamentParser $parser =
-    new FfeTournamentParser(),
-    private readonly TournamentGroupingService $grouping =
-    new TournamentGroupingService(),
-    private readonly ClubRegistrationSyncService $registrations =
-    new ClubRegistrationSyncService()
-    ) {
+    private readonly FfeHttpClient $http;
+
+    private readonly FfeTournamentListParser $listParser;
+
+    private readonly FfeTournamentParser $parser;
+
+    public function __construct()
+    {
+        $this->http = new FfeHttpClient();
+        $this->listParser = new FfeTournamentListParser();
+        $this->parser = new FfeTournamentParser();
     }
 
     public function syncDepartment(
@@ -34,12 +34,14 @@ private readonly FfeTournamentParser $parser =
         $stats = [
             'run_id' => $runId,
             'references_found' => 0,
+            'selected_references' => [],
             'created' => 0,
             'updated' => 0,
             'ignored' => 0,
             'errors' => 0,
-            'selected_references' => [],
             'failed_references' => [],
+            'groups' => null,
+            'registrations' => null,
         ];
 
         try {
@@ -50,8 +52,10 @@ private readonly FfeTournamentParser $parser =
 
             $listingHtml = $this->http->get($listingUrl);
 
-    $references = $this->listParser
-    ->extractUpcomingTournamentReferences($listingHtml);
+            $references = $this->listParser
+                ->extractUpcomingTournamentReferences($listingHtml);
+
+            sort($references);
 
             $stats['references_found'] = count($references);
             $stats['selected_references'] = $references;
@@ -60,14 +64,6 @@ private readonly FfeTournamentParser $parser =
 
             foreach ($references as $reference) {
                 $known = $knownSources[$reference] ?? null;
-
-                if (
-                    $known !== null
-                    && (int) $known['is_upcoming'] === 0
-                ) {
-                    $this->touchSource($reference);
-                    continue;
-                }
 
                 try {
                     $detailsHtml = $this->http->get(
@@ -105,7 +101,10 @@ private readonly FfeTournamentParser $parser =
 
                     $this->upsertSource($source);
 
-                    if (!$source['is_upcoming'] || $source['is_excluded']) {
+                    if (
+                        !$source['is_upcoming']
+                        || $source['is_excluded']
+                    ) {
                         $stats['ignored']++;
                     } elseif ($known === null) {
                         $stats['created']++;
@@ -114,10 +113,11 @@ private readonly FfeTournamentParser $parser =
                     }
                 } catch (Throwable $exception) {
                     $stats['errors']++;
+
                     $stats['failed_references'][] = [
                         'ffe_ref' => $reference,
                         'error' => $exception->getMessage(),
-];
+                    ];
 
                     error_log(
                         sprintf(
@@ -128,10 +128,28 @@ private readonly FfeTournamentParser $parser =
                     );
                 }
             }
-            $stats['groups'] = $this->grouping->rebuildUpcomingGroups();
-            $stats['registrations'] =
-    $this->registrations->refreshUpcomingRegistrations();
-            $this->finishRun($runId, 'succeeded', $stats);
+
+            /*
+             * On crée les groupes uniquement après avoir mis à jour les sources.
+             */
+            $stats['groups'] = (
+                new TournamentGroupingService()
+            )->rebuildUpcomingGroups();
+
+            /*
+             * Cette instanciation est volontairement faite ici :
+             * si un problème subsiste dans la partie inscriptions,
+             * le run sera enregistré comme failed dans la base.
+             */
+            $stats['registrations'] = (
+                new ClubRegistrationSyncService()
+            )->refreshUpcomingRegistrations();
+
+            $this->finishRun(
+                $runId,
+                'succeeded',
+                $stats
+            );
 
             return $stats;
         } catch (Throwable $exception) {
@@ -194,8 +212,8 @@ private readonly FfeTournamentParser $parser =
             ':updated' => $stats['updated'],
             ':ignored' => $stats['ignored'],
             ':club_entries_updated' => (int) (
-    $stats['registrations']['club_entries_updated'] ?? 0
-),
+                $stats['registrations']['club_entries_updated'] ?? 0
+            ),
             ':error_message' => $errorMessage,
             ':id' => $runId,
         ]);
@@ -230,19 +248,6 @@ private readonly FfeTournamentParser $parser =
         }
 
         return $sources;
-    }
-
-    private function touchSource(int $reference): void
-    {
-        $statement = Database::connection()->prepare(
-            'UPDATE pbe_tournament_sources
-             SET last_seen_at = UTC_TIMESTAMP()
-             WHERE ffe_ref = :ffe_ref'
-        );
-
-        $statement->execute([
-            ':ffe_ref' => $reference,
-        ]);
     }
 
     private function upsertSource(array $source): void
