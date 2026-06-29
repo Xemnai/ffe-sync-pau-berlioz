@@ -114,7 +114,6 @@ jobs:
 
           open -u "$SFTP_USER","$SFTP_PASSWORD" sftp://$SFTP_HOST:$SFTP_PORT
 
-          mkdir -p "$REMOTE_DIR"
           mirror -R \
             --delete \
             --verbose \
