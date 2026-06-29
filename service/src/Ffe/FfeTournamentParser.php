@@ -7,6 +7,8 @@ namespace PauBerlioz\FfeSync\Ffe;
 use DateTimeImmutable;
 use DateTimeZone;
 use RuntimeException;
+use DOMDocument;
+use DOMXPath;
 
 final class FfeTournamentParser
 {
@@ -46,7 +48,8 @@ final class FfeTournamentParser
 
         $cadence = $this->extractField($lines, 'Cadence');
         $announcement = $this->extractAnnouncement($lines);
-
+$address = $this->extractField($lines, 'Adresse')
+    ?? $this->extractStructuredField($html, 'Adresse');
         $normalizedTitle = $this->normalize($title);
         $isExcluded = $this->isExcludedTitle($normalizedTitle);
 
@@ -60,11 +63,8 @@ final class FfeTournamentParser
                 'https://www.echecs.asso.fr/FicheTournoi.aspx?Ref=%d',
                 $reference
             ),
-            'results_url' => sprintf(
-                'https://www.echecs.asso.fr/Resultats.aspx?Action=Ls&URL=Tournois%%2FId%%2F%d%%2F%d',
-                $reference,
-                $reference
-            ),
+'results_url' => $this->extractRankingUrl($html)
+    ?? $this->buildRankingUrl($reference),
             'start_date' => $startDate,
             'end_date' => $endDate,
             'rounds' => $this->extractIntegerField(
@@ -75,8 +75,8 @@ final class FfeTournamentParser
                 $title,
                 $cadence
             ),
-            'venue' => $this->extractField($lines, 'Adresse'),
-            'address' => $this->extractField($lines, 'Adresse'),
+         'venue' => $address,
+'address' => $address,
             'organizer' => $this->extractField($lines, 'Organisateur'),
             'arbiter' => $this->extractField($lines, 'Arbitre'),
             'contact' => $this->extractField($lines, 'Contact'),
@@ -423,4 +423,32 @@ final class FfeTournamentParser
             preg_replace('/[^a-z0-9]+/u', ' ', $value) ?? $value
         );
     }
+
+    private function extractRankingUrl(string $html): ?string
+{
+    if (
+        preg_match(
+            '~href\s*=\s*["\']([^"\']*Resultats\.aspx\?[^"\']*Action=Cl[^"\']*)["\']~iu',
+            $html,
+            $matches
+        ) !== 1
+    ) {
+        return null;
+    }
+
+    $url = html_entity_decode(
+        $matches[1],
+        ENT_QUOTES | ENT_HTML5,
+        'UTF-8'
+    );
+
+    if (
+        str_starts_with($url, 'https://')
+        || str_starts_with($url, 'http://')
+    ) {
+        return $url;
+    }
+
+    return 'https://www.echecs.asso.fr/' . ltrim($url, '/');
+}
 }
