@@ -138,7 +138,10 @@ final class OpenRouteServiceClient
 
         $body = curl_exec($curl);
         $curlError = curl_error($curl);
-        $statusCode = (int) curl_getinfo($curl, CURLINFO_RESPONSE_CODE);
+        $statusCode = (int) curl_getinfo(
+            $curl,
+            CURLINFO_RESPONSE_CODE
+        );
 
         curl_close($curl);
 
@@ -181,35 +184,35 @@ final class OpenRouteServiceClient
         return $decoded;
     }
 
-private function apiKey(): string
-{
-    static $apiKey = null;
+    private function apiKey(): string
+    {
+        static $apiKey = null;
 
-    if (is_string($apiKey)) {
+        if (is_string($apiKey)) {
+            return $apiKey;
+        }
+
+        $configPath = dirname(__DIR__, 2)
+            . '/config/runtime.php';
+
+        if (!is_file($configPath)) {
+            throw new RuntimeException(
+                'Configuration du service absente.'
+            );
+        }
+
+        $config = require $configPath;
+
+        $value = $config['openrouteservice']['api_key'] ?? null;
+
+        if (!is_string($value) || trim($value) === '') {
+            throw new RuntimeException(
+                'Clé OpenRouteService absente.'
+            );
+        }
+
+        $apiKey = trim($value);
+
         return $apiKey;
     }
-
-    $configPath = dirname(__DIR__, 2)
-        . '/config/runtime.php';
-
-    if (!is_file($configPath)) {
-        throw new RuntimeException(
-            'Configuration du service absente.'
-        );
-    }
-
-    $config = require $configPath;
-
-    $value = $config['openrouteservice']['api_key'] ?? null;
-
-    if (!is_string($value) || trim($value) === '') {
-        throw new RuntimeException(
-            'Clé OpenRouteService absente.'
-        );
-    }
-
-    $apiKey = trim($value);
-
-    return $apiKey;
-}
 }
