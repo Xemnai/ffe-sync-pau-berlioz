@@ -16,12 +16,11 @@ final class AppConfig
             return self::$config;
         }
 
-        $privateConfigPath = dirname(__DIR__, 4) . '/private/ffe-sync/runtime.php';
-        $localConfigPath = dirname(__DIR__) . '/config/runtime.php';
+$configPath = dirname(__DIR__) . '/config/runtime.php';
 
-        $configPath = is_file($privateConfigPath)
-            ? $privateConfigPath
-            : $localConfigPath;
+if (!is_file($configPath)) {
+    throw new RuntimeException('Configuration du service introuvable.');
+}
 
         if (!is_file($configPath)) {
             throw new RuntimeException('Configuration du service introuvable.');

@@ -105,7 +105,6 @@ jobs:
           SFTP_USER: ${{ secrets.OVH_SFTP_USERNAME }}
           SFTP_PASSWORD: ${{ secrets.OVH_SFTP_PASSWORD }}
           REMOTE_DIR: ${{ secrets.OVH_SFTP_REMOTE_DIR }}
-          PRIVATE_CONFIG_DIR: private/ffe-sync
         run: |
           lftp <<EOF
           set cmd:fail-exit true
@@ -123,8 +122,7 @@ jobs:
             service/ \
             "$REMOTE_DIR"
 
-          mkdir -p "$PRIVATE_CONFIG_DIR"
-          put -O "$PRIVATE_CONFIG_DIR" "$RUNNER_TEMP/runtime.php"
+          put -O "$REMOTE_DIR/config" "$RUNNER_TEMP/runtime.php"
 
           bye
           EOF
