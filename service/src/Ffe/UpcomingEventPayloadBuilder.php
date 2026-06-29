@@ -19,11 +19,12 @@ final class UpcomingEventPayloadBuilder
 
         foreach ($this->loadGroups() as $group) {
             $sources = $this->loadSources((int) $group['id']);
-            $clubPlayers = $this->loadClubPlayers((int) $group['id']);
 
             if ($sources === []) {
                 continue;
             }
+
+            $clubPlayers = $this->loadClubPlayers((int) $group['id']);
 
             $event = [
                 'schema_version' => 1,
@@ -31,7 +32,7 @@ final class UpcomingEventPayloadBuilder
                 'group_key' => $group['group_key'],
                 'group_id' => (int) $group['id'],
 
-                'title' => $group['title'],
+                'title' => (string) $group['title'],
                 'category_name' => 'Open à venir',
                 'tag_name' => $this->eventTagName(
                     (string) $group['cadence_kind']
@@ -43,8 +44,8 @@ final class UpcomingEventPayloadBuilder
                 'end_date' => $group['end_date'],
 
                 /*
-                 * Horaires volontairement approximatifs.
-                 * Nous pourrons les rendre configurables dans le plugin.
+                 * Les horaires FFE ne sont pas toujours structurés.
+                 * Ils seront approximatifs jusqu'à une future amélioration.
                  */
                 'start_time' => self::DEFAULT_START_TIME,
                 'end_time' => self::DEFAULT_END_TIME,
@@ -57,12 +58,17 @@ final class UpcomingEventPayloadBuilder
                     : (float) $group['distance_km'],
 
                 'rounds' => $this->uniformInteger($sources, 'rounds'),
-                'cadence' => $this->uniformString($sources, 'cadence'),
-                'fee_senior' => $this->uniformString(
+
+                'cadence' => $this->cleanCadence(
+                    $this->uniformString($sources, 'cadence')
+                ),
+
+                'fee_senior' => $this->representativePrice(
                     $sources,
                     'fee_senior'
                 ),
-                'fee_youth' => $this->uniformString(
+
+                'fee_youth' => $this->representativePrice(
                     $sources,
                     'fee_youth'
                 ),
@@ -210,8 +216,12 @@ final class UpcomingEventPayloadBuilder
         array $group,
         array $sources
     ): array {
-        $venue = $this->uniformString($sources, 'venue');
-        $address = $this->uniformString($sources, 'address');
+        /*
+         * Pour un groupe de plusieurs tournois, on prend la première
+         * adresse disponible, généralement celle de l'Open principal.
+         */
+        $venue = $this->firstNonEmptyString($sources, 'venue');
+        $address = $this->firstNonEmptyString($sources, 'address');
 
         $city = trim((string) $group['city']);
         $department = trim((string) $group['department']);
@@ -247,18 +257,27 @@ final class UpcomingEventPayloadBuilder
     ): array {
         return [
             'ffe_ref' => (int) $source['ffe_ref'],
+
             'label' => $this->sourceLabel(
                 (string) $group['title'],
                 (string) $source['title']
             ),
+
             'title' => $source['title'],
             'ffe_url' => $source['ffe_url'],
             'results_url' => $source['results_url'],
             'registration_url' => $source['registration_url'],
+
             'rounds' => $source['rounds'] === null
                 ? null
                 : (int) $source['rounds'],
-            'cadence' => $source['cadence'],
+
+            'cadence' => $this->cleanCadence(
+                $source['cadence'] === null
+                    ? null
+                    : (string) $source['cadence']
+            ),
+
             'cadence_kind' => $source['cadence_kind'],
             'fee_senior' => $source['fee_senior'],
             'fee_youth' => $source['fee_youth'],
@@ -476,24 +495,61 @@ final class UpcomingEventPayloadBuilder
         );
     }
 
-    private function formatPrice(
-        ?string $senior,
-        ?string $youth
+    private function firstNonEmptyString(
+        array $sources,
+        string $field
     ): ?string {
-        $senior = $senior === null ? null : trim($senior);
-        $youth = $youth === null ? null : trim($youth);
+        foreach ($sources as $source) {
+            $value = trim((string) ($source[$field] ?? ''));
 
-        if ($senior === '' || $senior === null) {
-            return $youth === '' || $youth === null
-                ? null
-                : sprintf('Jeunes : %s', $youth);
+            if ($value !== '') {
+                return $value;
+            }
         }
 
-        if ($youth === '' || $youth === null) {
-            return $senior;
+        return null;
+    }
+
+    private function representativePrice(
+        array $sources,
+        string $field
+    ): ?string {
+        $canonicalValue = null;
+        $candidates = [];
+
+        foreach ($sources as $source) {
+            $value = trim((string) ($source[$field] ?? ''));
+
+            if ($value === '') {
+                return null;
+            }
+
+            $canonical = $this->canonicalPrice($value);
+
+            if ($canonicalValue === null) {
+                $canonicalValue = $canonical;
+            } elseif ($canonical !== $canonicalValue) {
+                return null;
+            }
+
+            $candidates[] = $value;
         }
 
-        return sprintf('%s (jeunes %s)', $senior, $youth);
+        if ($candidates === []) {
+            return null;
+        }
+
+        /*
+         * On conserve l'explication la plus complète,
+         * notamment “à partir du 01/08/2026”.
+         */
+        usort(
+            $candidates,
+            static fn (string $left, string $right): int =>
+                strlen($right) <=> strlen($left)
+        );
+
+        return $candidates[0];
     }
 
     private function uniformString(
@@ -538,6 +594,67 @@ final class UpcomingEventPayloadBuilder
         }
 
         return (int) array_key_first($values);
+    }
+
+    private function cleanCadence(?string $cadence): ?string
+    {
+        if ($cadence === null) {
+            return null;
+        }
+
+        $cadence = str_replace(
+            ['[', ']'],
+            '',
+            $cadence
+        );
+
+        $cadence = preg_replace(
+            "/(\d+)\s*''/",
+            '$1"',
+            $cadence
+        ) ?? $cadence;
+
+        return trim(
+            preg_replace('/\s+/u', ' ', $cadence) ?? $cadence
+        );
+    }
+
+    private function formatPrice(
+        ?string $senior,
+        ?string $youth
+    ): ?string {
+        $senior = $senior === null ? null : trim($senior);
+        $youth = $youth === null ? null : trim($youth);
+
+        if ($senior === '' || $senior === null) {
+            return $youth === '' || $youth === null
+                ? null
+                : sprintf('Jeunes : %s', $youth);
+        }
+
+        if ($youth === '' || $youth === null) {
+            return $senior;
+        }
+
+        if (
+            $this->canonicalPrice($senior)
+            === $this->canonicalPrice($youth)
+        ) {
+            return $senior;
+        }
+
+        return sprintf('%s (jeunes %s)', $senior, $youth);
+    }
+
+    private function canonicalPrice(string $value): string
+    {
+        $value = preg_replace(
+            '/\s+à\s+partir\s+du\s+\d{1,2}\/\d{1,2}\/\d{4}/iu',
+            '',
+            $value
+        ) ?? $value;
+
+        return $this->normalize($value);
     }
 
     private function sourceLabel(
