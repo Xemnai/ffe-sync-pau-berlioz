@@ -356,47 +356,15 @@ final class TournamentGroupingService
             return '';
         }
 
-        /*
-         * 30ème Tournoi international de Créon – Tournoi Principal
-         * Jérôme Bert (-2200)
-         * => 30ème Tournoi international de Créon
-         *
-         * Le retrait n'est appliqué que pour une partie située après un
-         * séparateur et commençant par "Tournoi", ce qui évite de couper
-         * le mot tournoi situé dans le titre principal.
-         */
         $withoutRating = $this->removeRatingSuffix($title);
 
-        if (
-            preg_match(
-                '/^(?<family>.+?)\s*[-–—:]\s*tournoi\b.+$/iu',
-                $withoutRating,
-                $matches
-            ) === 1
-        ) {
-            return trim($matches['family']);
-        }
-
         /*
-         * Circuit d'Echecs Gascon 2026 Tournoi Open
-         * Circuit d'Echecs Gascon 2026 Tournoi
-         * => Circuit d'Echecs Gascon 2026
-         */
-        if (
-            preg_match(
-                '/^(?<family>.+?)\s+tournoi(?:\s+open)?$/iu',
-                $withoutRating,
-                $matches
-            ) === 1
-        ) {
-            return trim($matches['family']);
-        }
-
-        /*
-         * Second d'été de Fontenilles A (-2400)
-         * Second d'été de Fontenilles B (-1700)
-         * Pic d'Anie A / B
-         * => titre commun sans la variante finale.
+         * Étape importante : retirer d'abord A / B / C / 1 / 2 éventuel.
+         *
+         * Sans cela :
+         * "Circuit d'Echecs Gascon 2026 Tournoi Open A"
+         * devenait seulement "... Tournoi Open" et ne passait jamais
+         * dans la règle qui retire le suffixe "Tournoi Open".
          */
         $withoutVariant = preg_replace(
             '/(?:\s*[-–—:]?\s*)(?:\(?[A-Z]\)?|\(?\d{1,2}\)?)$/u',
@@ -407,6 +375,37 @@ final class TournamentGroupingService
         $withoutVariant = trim(
             $withoutVariant ?? $withoutRating
         );
+
+        /*
+         * 30ème Tournoi international de Créon – Tournoi Principal
+         * Jérôme Bert (-2200)
+         * => 30ème Tournoi international de Créon
+         */
+        if (
+            preg_match(
+                '/^(?<family>.+?)\s*[-–—:]\s*tournoi\b.+$/iu',
+                $withoutVariant,
+                $matches
+            ) === 1
+        ) {
+            return trim($matches['family']);
+        }
+
+        /*
+         * Circuit d'Echecs Gascon 2026 Tournoi
+         * Circuit d'Echecs Gascon 2026 Tournoi Open
+         * Circuit d'Echecs Gascon 2026 Tournoi Open A
+         * => Circuit d'Echecs Gascon 2026
+         */
+        if (
+            preg_match(
+                '/^(?<family>.+?)\s+tournoi(?:\s+open)?$/iu',
+                $withoutVariant,
+                $matches
+            ) === 1
+        ) {
+            return trim($matches['family']);
+        }
 
         return $withoutVariant !== ''
             ? $withoutVariant
