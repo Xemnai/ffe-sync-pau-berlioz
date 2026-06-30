@@ -1,8 +1,11 @@
-name: Import FFE manuel - développement
+name: Import FFE automatique
 
 on:
   workflow_dispatch:
   workflow_call:
+  schedule:
+    # 02:00 UTC chaque nuit : 03:00 en hiver, 04:00 en été en France.
+    - cron: '0 2 * * *'
 
 permissions:
   contents: read
@@ -15,33 +18,77 @@ jobs:
   import:
     name: Importer les tournois FFE
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
 
     steps:
-      - name: Déclencher la synchronisation FFE
+      - name: Synchroniser les départements un par un
         env:
           PBE_WORDPRESS_TO_SERVICE_SECRET: ${{ secrets.PBE_WORDPRESS_TO_SERVICE_SECRET }}
         run: |
           set -euo pipefail
 
-          body='{"departments":["64","40","33","32","65","31"]}'
-          timestamp="$(date +%s)"
-          nonce="$(openssl rand -hex 16)"
+          departments=(64 40 33 32 65 31)
+          failed=0
 
-          signature="$(printf '%s\n%s\n%s' "$timestamp" "$nonce" "$body" \
-            | openssl dgst -sha256 -hmac "$PBE_WORDPRESS_TO_SERVICE_SECRET" -hex \
-            | sed 's/^.* //')"
+          for department in "${departments[@]}"; do
+            echo "::group::Département ${department}"
 
-          curl \
-            --fail-with-body \
-            --silent \
-            --show-error \
-            --max-time 360 \
-            --request POST \
-            --header 'Content-Type: application/json; charset=utf-8' \
-            --header 'Accept: application/json' \
-            --header "X-PBE-Timestamp: $timestamp" \
-            --header "X-PBE-Nonce: $nonce" \
-            --header "X-PBE-Signature: $signature" \
-            --data "$body" \
-            'https://phelipot.pro/echecs/ffe-sync/trigger.php'
+            body="{\"department\":\"${department}\"}"
+            timestamp="$(date +%s)"
+            nonce="$(openssl rand -hex 16)"
+
+            signature="$(printf '%s\n%s\n%s' "$timestamp" "$nonce" "$body" \
+              | openssl dgst -sha256 -hmac "$PBE_WORDPRESS_TO_SERVICE_SECRET" -hex \
+              | sed 's/^.* //')"
+
+            response_file="$(mktemp)"
+
+            if ! status_code="$(curl \
+              --silent \
+              --show-error \
+              --connect-timeout 15 \
+              --max-time 120 \
+              --request POST \
+              --header 'Content-Type: application/json; charset=utf-8' \
+              --header 'Accept: application/json' \
+              --header "X-PBE-Timestamp: $timestamp" \
+              --header "X-PBE-Nonce: $nonce" \
+              --header "X-PBE-Signature: $signature" \
+              --data "$body" \
+              --output "$response_file" \
+              --write-out '%{http_code}' \
+              'https://phelipot.pro/echecs/ffe-sync/trigger.php')"; then
+              echo "Erreur réseau lors de l’import du département ${department}."
+              cat "$response_file" || true
+              rm -f "$response_file"
+              failed=1
+              echo "::endgroup::"
+              continue
+            fi
+
+            response="$(cat "$response_file")"
+            rm -f "$response_file"
+
+            echo "$response"
+
+            if [[ "$status_code" -lt 200 || "$status_code" -ge 300 ]]; then
+              echo "Le service a répondu HTTP ${status_code} pour le département ${department}."
+              failed=1
+              echo "::endgroup::"
+              continue
+            fi
+
+            if ! printf '%s' "$response" | jq -e \
+              '(.status == "ok") or (.status == "partial")' \
+              >/dev/null; then
+              echo "Réponse de synchronisation inattendue pour le département ${department}."
+              failed=1
+            fi
+
+            echo "::endgroup::"
+          done
+
+          if [[ "$failed" -ne 0 ]]; then
+            echo "Au moins un département n’a pas pu être synchronisé."
+            exit 1
+          fi
