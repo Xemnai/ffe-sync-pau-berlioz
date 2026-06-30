@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use PauBerlioz\FfeSync\Ffe\DepartmentScope;
 use PauBerlioz\FfeSync\Ffe\UpcomingEventPayloadBuilder;
 use PauBerlioz\FfeSync\Security\SignedRequestAuthenticator;
 use PauBerlioz\FfeSync\Security\UnauthorizedRequestException;
@@ -30,7 +31,7 @@ try {
     try {
         SignedRequestAuthenticator::verify($body);
     } catch (UnauthorizedRequestException) {
-        verifyFallbackWordPressSignature($body);
+        verifyWordPressSignature($body);
     }
 
     $stage = 'payload_decoding';
@@ -42,17 +43,14 @@ try {
         JSON_THROW_ON_ERROR
     );
 
-    $department = (string) ($payload['department'] ?? '64');
-
-    if ($department !== '64') {
-        http_response_code(422);
-
-        echo json_encode([
-            'error' => 'unsupported_department',
-        ]);
-
-        exit;
+    if (!is_array($payload)) {
+        throw new InvalidArgumentException(
+            'Payload JSON invalide.'
+        );
     }
+
+    $stage = 'department_validation';
+    $departments = DepartmentScope::fromPayload($payload);
 
     $stage = 'payload_building';
 
@@ -63,11 +61,27 @@ try {
         [
             'status' => 'ok',
             'generated_at_utc' => gmdate('c'),
-            'department' => $department,
+            'departments' => $departments,
             'count' => count($events),
             'events' => $events,
         ],
         JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR
+    );
+} catch (UnauthorizedRequestException $exception) {
+    http_response_code(401);
+
+    echo json_encode([
+        'error' => 'unauthorized',
+    ]);
+} catch (InvalidArgumentException $exception) {
+    http_response_code(422);
+
+    echo json_encode(
+        [
+            'error' => 'invalid_departments',
+            'message' => $exception->getMessage(),
+        ],
+        JSON_UNESCAPED_UNICODE
     );
 } catch (Throwable $exception) {
     error_log(
@@ -81,26 +95,24 @@ try {
 
     http_response_code(500);
 
-    echo json_encode(
-        [
-            'error' => 'events_failed',
-            'stage' => $stage,
-            'exception' => $exception::class,
-            'message' => $exception->getMessage(),
-        ],
-        JSON_UNESCAPED_UNICODE
-    );
+    echo json_encode([
+        'error' => 'events_failed',
+    ]);
 }
 
-function verifyFallbackWordPressSignature(string $body): void
+function verifyWordPressSignature(string $body): void
 {
-    $timestamp = headerValue('HTTP_X_PBE_TIMESTAMP');
-    $nonce = headerValue('HTTP_X_PBE_NONCE');
-    $signature = headerValue('HTTP_X_PBE_SIGNATURE');
+    $timestamp = requestHeader('HTTP_X_PBE_TIMESTAMP');
+    $nonce = requestHeader('HTTP_X_PBE_NONCE');
+    $signature = requestHeader('HTTP_X_PBE_SIGNATURE');
 
-    if ($timestamp === null || $nonce === null || $signature === null) {
+    if (
+        $timestamp === null
+        || $nonce === null
+        || $signature === null
+    ) {
         throw new UnauthorizedRequestException(
-            'Signature WordPress absente.'
+            'En-têtes WordPress absents.'
         );
     }
 
@@ -110,10 +122,7 @@ function verifyFallbackWordPressSignature(string $body): void
         );
     }
 
-    $now = time();
-    $requestTime = (int) $timestamp;
-
-    if (abs($now - $requestTime) > 300) {
+    if (abs(time() - (int) $timestamp) > 300) {
         throw new UnauthorizedRequestException(
             'Timestamp WordPress expiré.'
         );
@@ -125,26 +134,6 @@ function verifyFallbackWordPressSignature(string $body): void
         );
     }
 
-    $secret = wordpressToServiceSecret();
-
-    $expected = hash_hmac(
-        'sha256',
-        $timestamp . "\n" . $nonce . "\n" . $body,
-        $secret
-    );
-
-    $signature = preg_replace('/^sha256=/i', '', trim($signature))
-        ?? trim($signature);
-
-    if (!hash_equals($expected, $signature)) {
-        throw new UnauthorizedRequestException(
-            'Signature WordPress invalide.'
-        );
-    }
-}
-
-function wordpressToServiceSecret(): string
-{
     $configPath = __DIR__ . '/config/runtime.php';
 
     if (!is_file($configPath)) {
@@ -159,14 +148,30 @@ function wordpressToServiceSecret(): string
 
     if (!is_string($secret) || trim($secret) === '') {
         throw new RuntimeException(
-            'Secret wordpress_to_service absent.'
+            'Secret WordPress vers service absent.'
         );
     }
 
-    return trim($secret);
+    $expectedSignature = hash_hmac(
+        'sha256',
+        $timestamp . "\n" . $nonce . "\n" . $body,
+        trim($secret)
+    );
+
+    $signature = preg_replace(
+        '/^sha256=/i',
+        '',
+        trim($signature)
+    ) ?? trim($signature);
+
+    if (!hash_equals($expectedSignature, $signature)) {
+        throw new UnauthorizedRequestException(
+            'Signature WordPress invalide.'
+        );
+    }
 }
 
-function headerValue(string $serverKey): ?string
+function requestHeader(string $serverKey): ?string
 {
     $value = $_SERVER[$serverKey] ?? null;
 

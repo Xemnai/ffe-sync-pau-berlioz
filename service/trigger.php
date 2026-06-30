@@ -2,7 +2,8 @@
 
 declare(strict_types=1);
 
-use PauBerlioz\FfeSync\Ffe\FfeSyncService;
+use PauBerlioz\FfeSync\Ffe\DepartmentScope;
+use PauBerlioz\FfeSync\Ffe\MultiDepartmentFfeSyncService;
 use PauBerlioz\FfeSync\Security\SignedRequestAuthenticator;
 use PauBerlioz\FfeSync\Security\UnauthorizedRequestException;
 
@@ -29,8 +30,8 @@ try {
 
     /*
      * Compatibilité :
-     * - signature historique utilisée par GitHub Actions ;
-     * - signature X-PBE-* utilisée par le plugin WordPress.
+     * - signature historique GitHub Actions ;
+     * - signature X-PBE-* du plugin WordPress.
      */
     try {
         SignedRequestAuthenticator::verify($body);
@@ -47,28 +48,24 @@ try {
         JSON_THROW_ON_ERROR
     );
 
-    $department = (string) ($payload['department'] ?? '');
-
-    if ($department !== '64') {
-        http_response_code(422);
-
-        echo json_encode([
-            'error' => 'unsupported_department',
-        ]);
-
-        exit;
+    if (!is_array($payload)) {
+        throw new InvalidArgumentException(
+            'Payload JSON invalide.'
+        );
     }
 
-    $stage = 'synchronization';
+    $stage = 'department_validation';
+    $departments = DepartmentScope::fromPayload($payload);
 
-    $result = (new FfeSyncService())->syncDepartment(
-        $department,
+    $stage = 'synchronization';
+    $result = (new MultiDepartmentFfeSyncService())->sync(
+        $departments,
         'manual'
     );
 
     echo json_encode(
         [
-            'status' => 'ok',
+            'status' => $result['status'],
             'result' => $result,
         ],
         JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR
@@ -83,6 +80,16 @@ try {
     echo json_encode([
         'error' => 'unauthorized',
     ]);
+} catch (InvalidArgumentException $exception) {
+    http_response_code(422);
+
+    echo json_encode(
+        [
+            'error' => 'invalid_departments',
+            'message' => $exception->getMessage(),
+        ],
+        JSON_UNESCAPED_UNICODE
+    );
 } catch (Throwable $exception) {
     error_log(
         sprintf(

@@ -7,38 +7,41 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: import-ffe-pau-berlioz
+  cancel-in-progress: false
+
 jobs:
-  import_64:
+  import:
+    name: Importer les tournois FFE
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
-      - name: Déclencher l'import du département 64
+      - name: Déclencher la synchronisation FFE
         env:
-          PBE_SECRET: ${{ secrets.PBE_WORDPRESS_TO_SERVICE_SECRET }}
+          PBE_WORDPRESS_TO_SERVICE_SECRET: ${{ secrets.PBE_WORDPRESS_TO_SERVICE_SECRET }}
         run: |
           set -euo pipefail
 
-          BODY='{"department":"64"}'
-          TIMESTAMP="$(date +%s)"
-          NONCE="$(openssl rand -hex 32)"
+          body='{"departments":["64","40","33","32","65","31"]}'
+          timestamp="$(date +%s)"
+          nonce="$(openssl rand -hex 16)"
 
-          SIGNATURE="$(
-            printf '%s\n%s\n%s' \
-              "$TIMESTAMP" \
-              "$NONCE" \
-              "$BODY" \
-            | openssl dgst -sha256 -hmac "$PBE_SECRET" -hex \
-            | awk '{print $NF}'
-          )"
+          signature="$(printf '%s\n%s\n%s' "$timestamp" "$nonce" "$body" \
+            | openssl dgst -sha256 -hmac "$PBE_WORDPRESS_TO_SERVICE_SECRET" -hex \
+            | sed 's/^.* //')"
 
           curl \
-            --connect-timeout 15 \
-            --max-time 120 \
             --fail-with-body \
+            --silent \
+            --show-error \
+            --max-time 360 \
             --request POST \
-            --header "Content-Type: application/json" \
-            --header "X-PBE-Timestamp: $TIMESTAMP" \
-            --header "X-PBE-Nonce: $NONCE" \
-            --header "X-PBE-Signature: $SIGNATURE" \
-            --data "$BODY" \
-            "https://phelipot.pro/echecs/ffe-sync/trigger.php"
+            --header 'Content-Type: application/json; charset=utf-8' \
+            --header 'Accept: application/json' \
+            --header "X-PBE-Timestamp: $timestamp" \
+            --header "X-PBE-Nonce: $nonce" \
+            --header "X-PBE-Signature: $signature" \
+            --data "$body" \
+            'https://phelipot.pro/echecs/ffe-sync/trigger.php'
