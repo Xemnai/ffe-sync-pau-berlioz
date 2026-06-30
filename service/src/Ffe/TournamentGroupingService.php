@@ -14,31 +14,21 @@ final class TournamentGroupingService
     public function rebuildUpcomingGroups(): array
     {
         $sources = $this->loadUpcomingSources();
-
-        if ($sources === []) {
-            return [
-                'groups_total' => 0,
-                'single_tournament_groups' => 0,
-                'multi_tournament_groups' => 0,
-            ];
-        }
-
-        $clusters = [];
-
-        foreach ($sources as $source) {
-            $groupKey = $this->buildGroupKey($source);
-
-            $clusters[$groupKey][] = $source;
-        }
+        $clusters = $this->buildClusters($sources);
 
         $connection = Database::connection();
         $connection->beginTransaction();
 
         try {
-            $this->removeSourceLinks(
-                $connection,
-                array_column($sources, 'ffe_ref')
-            );
+            /*
+             * On repart de toutes les associations existantes.
+             *
+             * C'est volontaire : si un tournoi anciennement importé devient
+             * fermé ou annulé, il est désormais is_excluded = 1 et n'est
+             * plus dans $sources. En supprimant d'abord tous les liens,
+             * il ne peut pas rester associé à un ancien groupe.
+             */
+            $this->removeAllSourceLinks($connection);
 
             $singleTournamentGroups = 0;
             $multiTournamentGroups = 0;
@@ -51,6 +41,7 @@ final class TournamentGroupingService
                 );
 
                 $groupTitle = $this->buildGroupTitle($groupSources);
+
                 $groupId = $this->upsertGroup(
                     $connection,
                     $groupKey,
@@ -70,7 +61,9 @@ final class TournamentGroupingService
                     $singleTournamentGroups++;
                 }
             }
-$this->deleteOrphanGroups($connection);
+
+            $this->deleteOrphanGroups($connection);
+
             $connection->commit();
 
             return [
@@ -112,31 +105,50 @@ $this->deleteOrphanGroups($connection);
         return $statement->fetchAll(PDO::FETCH_ASSOC);
     }
 
-private function buildGroupKey(array $source): string
-{
-    $parts = [
-        $this->familyTitle((string) $source['title']),
-        $this->normalize((string) $source['department']),
-        $this->normalize((string) $source['city']),
-        (string) $source['start_date'],
-        (string) $source['end_date'],
-    ];
+    private function buildClusters(array $sources): array
+    {
+        $clusters = [];
 
-    return hash('sha256', implode('|', $parts));
-}
+        foreach ($sources as $source) {
+            $groupKey = $this->buildGroupKey($source);
+
+            $clusters[$groupKey][] = $source;
+        }
+
+        return $clusters;
+    }
+
+    private function buildGroupKey(array $source): string
+    {
+        $parts = [
+            $this->normalize(
+                $this->familyTitle((string) $source['title'])
+            ),
+            $this->normalize((string) $source['department']),
+            $this->normalize((string) $source['city']),
+            (string) $source['start_date'],
+            (string) $source['end_date'],
+        ];
+
+        return hash('sha256', implode('|', $parts));
+    }
 
     private function buildGroupTitle(array $sources): string
     {
-        $firstTitle = (string) $sources[0]['title'];
+        $firstTitle = trim((string) $sources[0]['title']);
 
         if (count($sources) === 1) {
             return $firstTitle;
         }
 
-        $titleWithoutVariant = $this->removeVariantSuffix($firstTitle);
+        /*
+         * Toutes les sources d'un cluster ont le même family title
+         * normalisé. On conserve la première version lisible, avec accents.
+         */
+        $familyTitle = $this->familyTitle($firstTitle);
 
-        return $titleWithoutVariant !== ''
-            ? $titleWithoutVariant
+        return $familyTitle !== ''
+            ? $familyTitle
             : $firstTitle;
     }
 
@@ -213,37 +225,11 @@ private function buildGroupKey(array $source): string
         return (int) $groupId;
     }
 
-    private function removeSourceLinks(
-        PDO $connection,
-        array $references
-    ): void {
-        $references = array_values(
-            array_unique(
-                array_map(
-                    static fn (mixed $reference): int => (int) $reference,
-                    $references
-                )
-            )
+    private function removeAllSourceLinks(PDO $connection): void
+    {
+        $connection->exec(
+            'DELETE FROM pbe_event_group_sources'
         );
-
-        if ($references === []) {
-            return;
-        }
-
-        $placeholders = implode(
-            ',',
-            array_fill(0, count($references), '?')
-        );
-
-        $statement = $connection->prepare(
-            sprintf(
-                'DELETE FROM pbe_event_group_sources
-                 WHERE ffe_ref IN (%s)',
-                $placeholders
-            )
-        );
-
-        $statement->execute($references);
     }
 
     private function replaceGroupSources(
@@ -290,32 +276,57 @@ private function buildGroupKey(array $source): string
             return $leftRank <=> $rightRank;
         }
 
+        $titleComparison = strnatcasecmp(
+            $this->normalize((string) $left['title']),
+            $this->normalize((string) $right['title'])
+        );
+
+        if ($titleComparison !== 0) {
+            return $titleComparison;
+        }
+
         return (int) $left['ffe_ref'] <=> (int) $right['ffe_ref'];
     }
 
     private function variantRank(string $title): int
     {
-        if (
-            preg_match(
-                '/(?:\s*[-–—:]?\s*)([A-Z])$/u',
-                trim($title),
-                $matches
-            ) === 1
-        ) {
-            return ord(strtoupper($matches[1])) - 64;
+        $normalizedTitle = $this->normalize($title);
+        $titleWithoutRating = $this->removeRatingSuffix($title);
+        $normalizedWithoutRating = $this->normalize($titleWithoutRating);
+
+        if (str_contains($normalizedTitle, 'principal')) {
+            return 0;
+        }
+
+        /*
+         * Exemple :
+         * Circuit d'Echecs Gascon 2026 Tournoi
+         * avant
+         * Circuit d'Echecs Gascon 2026 Tournoi Open
+         */
+        if (preg_match('/\btournoi$/u', $normalizedWithoutRating) === 1) {
+            return 10;
+        }
+
+        if (str_contains($normalizedTitle, 'open')) {
+            return 20;
         }
 
         if (
             preg_match(
-                '/(?:\s*[-–—:]?\s*)(\d{1,2})$/u',
-                trim($title),
+                '/(?:^|\s)([a-z])$/u',
+                $normalizedWithoutRating,
                 $matches
             ) === 1
         ) {
-            return 100 + (int) $matches[1];
+            return 30 + (ord($matches[1]) - ord('a'));
         }
 
-        return 0;
+        if (str_contains($normalizedTitle, 'masters')) {
+            return 80;
+        }
+
+        return 100;
     }
 
     private function groupCadenceKind(array $sources): string
@@ -339,18 +350,76 @@ private function buildGroupKey(array $source): string
 
     private function familyTitle(string $title): string
     {
-        return $this->normalize(
-            $this->removeVariantSuffix($title)
+        $title = trim($title);
+
+        if ($title === '') {
+            return '';
+        }
+
+        /*
+         * 30ème Tournoi international de Créon – Tournoi Principal
+         * Jérôme Bert (-2200)
+         * => 30ème Tournoi international de Créon
+         *
+         * Le retrait n'est appliqué que pour une partie située après un
+         * séparateur et commençant par "Tournoi", ce qui évite de couper
+         * le mot tournoi situé dans le titre principal.
+         */
+        $withoutRating = $this->removeRatingSuffix($title);
+
+        if (
+            preg_match(
+                '/^(?<family>.+?)\s*[-–—:]\s*tournoi\b.+$/iu',
+                $withoutRating,
+                $matches
+            ) === 1
+        ) {
+            return trim($matches['family']);
+        }
+
+        /*
+         * Circuit d'Echecs Gascon 2026 Tournoi Open
+         * Circuit d'Echecs Gascon 2026 Tournoi
+         * => Circuit d'Echecs Gascon 2026
+         */
+        if (
+            preg_match(
+                '/^(?<family>.+?)\s+tournoi(?:\s+open)?$/iu',
+                $withoutRating,
+                $matches
+            ) === 1
+        ) {
+            return trim($matches['family']);
+        }
+
+        /*
+         * Second d'été de Fontenilles A (-2400)
+         * Second d'été de Fontenilles B (-1700)
+         * Pic d'Anie A / B
+         * => titre commun sans la variante finale.
+         */
+        $withoutVariant = preg_replace(
+            '/(?:\s*[-–—:]?\s*)(?:\(?[A-Z]\)?|\(?\d{1,2}\)?)$/u',
+            '',
+            $withoutRating
         );
+
+        $withoutVariant = trim(
+            $withoutVariant ?? $withoutRating
+        );
+
+        return $withoutVariant !== ''
+            ? $withoutVariant
+            : $title;
     }
 
-    private function removeVariantSuffix(string $title): string
+    private function removeRatingSuffix(string $title): string
     {
         return trim(
             preg_replace(
-                '/(?:\s*[-–—:]?\s*)(?:\(?[A-Z]\)?|\(?\d{1,2}\)?)$/u',
+                '/\s*\(\s*[+-]\s*\d{3,4}\s*\)\s*$/u',
                 '',
-                trim($title)
+                $title
             ) ?? $title
         );
     }
@@ -367,6 +436,15 @@ private function buildGroupKey(array $source): string
                 'ô' => 'o', 'ö' => 'o',
                 'ù' => 'u', 'ú' => 'u', 'û' => 'u', 'ü' => 'u',
                 'ÿ' => 'y',
+                'œ' => 'oe',
+                'À' => 'a', 'Á' => 'a', 'Â' => 'a', 'Ä' => 'a',
+                'Ç' => 'c',
+                'È' => 'e', 'É' => 'e', 'Ê' => 'e', 'Ë' => 'e',
+                'Î' => 'i', 'Ï' => 'i',
+                'Ô' => 'o', 'Ö' => 'o',
+                'Ù' => 'u', 'Ú' => 'u', 'Û' => 'u', 'Ü' => 'u',
+                'Ÿ' => 'y',
+                'Œ' => 'oe',
             ]
         );
 
@@ -378,14 +456,19 @@ private function buildGroupKey(array $source): string
     }
 
     private function deleteOrphanGroups(PDO $connection): void
-{
-    $connection->exec(
-        'DELETE g
-         FROM pbe_event_groups g
-         LEFT JOIN pbe_event_group_sources egs
-             ON egs.group_id = g.id
-         WHERE egs.group_id IS NULL
-           AND g.wp_event_id IS NULL'
-    );
-}
+    {
+        /*
+         * On conserve les anciens groupes éventuellement liés à un évènement
+         * WordPress : le plugin WordPress se charge de mettre l'évènement
+         * absent du nouveau payload à la corbeille après une synchro complète.
+         */
+        $connection->exec(
+            'DELETE g
+             FROM pbe_event_groups g
+             LEFT JOIN pbe_event_group_sources egs
+                 ON egs.group_id = g.id
+             WHERE egs.group_id IS NULL
+               AND g.wp_event_id IS NULL'
+        );
+    }
 }

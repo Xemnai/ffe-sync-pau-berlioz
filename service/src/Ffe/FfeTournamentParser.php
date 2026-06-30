@@ -50,7 +50,7 @@ final class FfeTournamentParser
         $address = $this->extractField($lines, 'Adresse');
 
         $normalizedTitle = $this->normalize($title);
-        $isExcluded = $this->isExcludedTitle($normalizedTitle);
+        $exclusionReason = $this->exclusionReason($normalizedTitle);
 
         return [
             'ffe_ref' => $reference,
@@ -64,11 +64,6 @@ final class FfeTournamentParser
                 $reference
             ),
 
-            /*
-             * On utilise directement l'URL du classement.
-             * Si la FFE n'a pas encore publié de tableau, le parser
-             * des inscrits retournera simplement "unavailable".
-             */
             'results_url' => $this->buildRankingUrl($reference),
 
             'start_date' => $startDate,
@@ -105,11 +100,8 @@ final class FfeTournamentParser
                 $html
             ),
 
-            'is_excluded' => $isExcluded,
-
-            'exclusion_reason' => $isExcluded
-                ? 'Titre scolaire, collège, interne ou individuel.'
-                : null,
+            'is_excluded' => $exclusionReason !== null,
+            'exclusion_reason' => $exclusionReason,
         ];
     }
 
@@ -444,12 +436,55 @@ final class FfeTournamentParser
         return null;
     }
 
-    private function isExcludedTitle(string $normalizedTitle): bool
+    private function exclusionReason(string $normalizedTitle): ?string
     {
-        return preg_match(
-            '/\b(scolaire|ecole|college|interne|individuel)\b/u',
-            $normalizedTitle
-        ) === 1;
+        /*
+         * Les contrôles portent uniquement sur le titre.
+         * Après normalize(), "fermé" devient "ferme" et
+         * "C.E.I.T." devient "c e i t".
+         */
+        if (
+            preg_match(
+                '/\bannule(?:e|s|es)?\b/u',
+                $normalizedTitle
+            ) === 1
+        ) {
+            return 'Tournoi annulé.';
+        }
+
+        if (
+            preg_match(
+                '/\bferme(?:e|s|es)?\b/u',
+                $normalizedTitle
+            ) === 1
+        ) {
+            return 'Tournoi fermé.';
+        }
+
+        if (
+            preg_match(
+                '/\bdu\s+(?:ceit|c\s*e\s*i\s*t)\b/u',
+                $normalizedTitle
+            ) === 1
+        ) {
+            return 'Tournoi du CEIT.';
+        }
+
+        $rules = [
+            '/\bscolaires?\b/u' => 'Tournoi scolaire.',
+            '/\becoles?\b/u' => 'Tournoi d’école.',
+            '/\bcolleges?\b/u' => 'Tournoi de collège.',
+            '/\binternes?\b/u' => 'Tournoi interne.',
+            '/\bindividuels?\b/u' => 'Tournoi individuel.',
+        ];
+
+        foreach ($rules as $pattern => $reason) {
+            if (preg_match($pattern, $normalizedTitle) === 1) {
+                return $reason;
+            }
+        }
+
+        return null;
     }
 
     private function normalize(string $value): string
@@ -464,6 +499,7 @@ final class FfeTournamentParser
                 'ô' => 'o', 'ö' => 'o',
                 'ù' => 'u', 'ú' => 'u', 'û' => 'u', 'ü' => 'u',
                 'ÿ' => 'y',
+                'œ' => 'oe',
                 'À' => 'a', 'Á' => 'a', 'Â' => 'a', 'Ä' => 'a',
                 'Ç' => 'c',
                 'È' => 'e', 'É' => 'e', 'Ê' => 'e', 'Ë' => 'e',
@@ -471,6 +507,7 @@ final class FfeTournamentParser
                 'Ô' => 'o', 'Ö' => 'o',
                 'Ù' => 'u', 'Ú' => 'u', 'Û' => 'u', 'Ü' => 'u',
                 'Ÿ' => 'y',
+                'Œ' => 'oe',
             ]
         );
 
