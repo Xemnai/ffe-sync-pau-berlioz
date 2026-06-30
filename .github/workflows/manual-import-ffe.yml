@@ -4,7 +4,8 @@ on:
   workflow_dispatch:
   workflow_call:
   schedule:
-    # 02:00 UTC chaque nuit : 03:00 en hiver, 04:00 en été en France.
+    # 02:00 UTC : après l'import, le plugin WordPress planifié à 06:20
+    # récupère uniquement le payload depuis events.php.
     - cron: '0 2 * * *'
 
 permissions:
@@ -18,22 +19,30 @@ jobs:
   import:
     name: Importer les tournois FFE
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
-      - name: Synchroniser les départements un par un
+      - name: Importer les départements puis finaliser
         env:
           PBE_WORDPRESS_TO_SERVICE_SECRET: ${{ secrets.PBE_WORDPRESS_TO_SERVICE_SECRET }}
         run: |
           set -euo pipefail
 
-          departments=(64 40 33 32 65 31)
-          failed=0
+          endpoint='https://phelipot.pro/echecs/ffe-sync/trigger.php'
 
-          for department in "${departments[@]}"; do
-            echo "::group::Département ${department}"
+          post_action() {
+            local label="$1"
+            local body="$2"
+            local max_time="$3"
+            local timestamp
+            local nonce
+            local signature
+            local response_file
+            local status_code
+            local response
 
-            body="{\"department\":\"${department}\"}"
+            echo "::group::${label}"
+
             timestamp="$(date +%s)"
             nonce="$(openssl rand -hex 16)"
 
@@ -47,7 +56,7 @@ jobs:
               --silent \
               --show-error \
               --connect-timeout 15 \
-              --max-time 120 \
+              --max-time "$max_time" \
               --request POST \
               --header 'Content-Type: application/json; charset=utf-8' \
               --header 'Accept: application/json' \
@@ -57,38 +66,51 @@ jobs:
               --data "$body" \
               --output "$response_file" \
               --write-out '%{http_code}' \
-              'https://phelipot.pro/echecs/ffe-sync/trigger.php')"; then
-              echo "Erreur réseau lors de l’import du département ${department}."
+              "$endpoint")"; then
+              echo "Erreur réseau : le service n’a pas répondu pour ${label}."
               cat "$response_file" || true
               rm -f "$response_file"
-              failed=1
               echo "::endgroup::"
-              continue
+              return 1
             fi
 
             response="$(cat "$response_file")"
             rm -f "$response_file"
 
-            echo "$response"
+            printf '%s\n' "$response"
 
             if [[ "$status_code" -lt 200 || "$status_code" -ge 300 ]]; then
-              echo "Le service a répondu HTTP ${status_code} pour le département ${department}."
-              failed=1
+              echo "Le service a répondu HTTP ${status_code} pour ${label}."
               echo "::endgroup::"
-              continue
+              return 1
             fi
 
-            if ! printf '%s' "$response" | jq -e \
-              '(.status == "ok") or (.status == "partial")' \
-              >/dev/null; then
-              echo "Réponse de synchronisation inattendue pour le département ${department}."
-              failed=1
+            if ! printf '%s' "$response" | jq -e '.status == "ok"' >/dev/null; then
+              echo "Réponse inattendue du service pour ${label}."
+              echo "::endgroup::"
+              return 1
             fi
 
             echo "::endgroup::"
+          }
+
+          # Une requête courte par département : listes + fiches FFE + base SQL.
+          # En cas d'erreur, arrêt immédiat : on évite d'empiler de nouvelles
+          # requêtes pendant qu'OVH pourrait encore traiter la précédente.
+          departments=(64 40 33 32 65 31)
+
+          for department in "${departments[@]}"; do
+            post_action \
+              "Département ${department}" \
+              "{\"action\":\"import_department\",\"department\":\"${department}\"}" \
+              180
+
+            sleep 2
           done
 
-          if [[ "$failed" -ne 0 ]]; then
-            echo "Au moins un département n’a pas pu être synchronisé."
-            exit 1
-          fi
+          # Une seule opération globale, après les six imports :
+          # groupes, distances et participants du club.
+          post_action \
+            "Finalisation globale" \
+            '{"action":"finalize"}' \
+            240

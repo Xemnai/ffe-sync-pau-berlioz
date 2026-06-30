@@ -3,13 +3,14 @@
 declare(strict_types=1);
 
 use PauBerlioz\FfeSync\Ffe\DepartmentScope;
-use PauBerlioz\FfeSync\Ffe\MultiDepartmentFfeSyncService;
+use PauBerlioz\FfeSync\Ffe\FfeSyncService;
 use PauBerlioz\FfeSync\Security\SignedRequestAuthenticator;
 use PauBerlioz\FfeSync\Security\UnauthorizedRequestException;
 
 require_once __DIR__ . '/bootstrap.php';
 
 header('Content-Type: application/json; charset=utf-8');
+header('Cache-Control: no-store');
 
 if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
     http_response_code(405);
@@ -30,8 +31,8 @@ try {
 
     /*
      * Compatibilité :
-     * - signature historique GitHub Actions ;
-     * - signature X-PBE-* du plugin WordPress.
+     * - signature historique du service ;
+     * - signature X-PBE-* envoyée par GitHub Actions.
      */
     try {
         SignedRequestAuthenticator::verify($body);
@@ -54,20 +55,68 @@ try {
         );
     }
 
-    $stage = 'department_validation';
-    $departments = DepartmentScope::fromPayload($payload);
+    $action = trim((string) (
+        $payload['action'] ?? 'import_department'
+    ));
 
-    $stage = 'synchronization';
-    $result = (new MultiDepartmentFfeSyncService())->sync(
-        $departments,
-        'manual'
-    );
+    $service = new FfeSyncService();
+
+    switch ($action) {
+        case 'import_department':
+            $stage = 'department_validation';
+
+            $departments = DepartmentScope::fromPayload($payload);
+
+            /*
+             * Une requête HTTP = un département. Le workflow les enchaîne,
+             * puis appelle "finalize" une seule fois.
+             */
+            if (count($departments) !== 1) {
+                throw new InvalidArgumentException(
+                    'L’action import_department attend un seul département.'
+                );
+            }
+
+            $department = $departments[0];
+
+            $stage = 'department_import';
+
+            $result = $service->syncDepartment(
+                $department,
+                'github_actions_import',
+                false
+            );
+
+            $response = [
+                'status' => 'ok',
+                'action' => 'import_department',
+                'department' => $department,
+                'result' => $result,
+            ];
+            break;
+
+        case 'finalize':
+            $stage = 'finalization';
+
+            $result = $service->finalizeUpcoming(
+                'github_actions_finalize'
+            );
+
+            $response = [
+                'status' => 'ok',
+                'action' => 'finalize',
+                'result' => $result,
+            ];
+            break;
+
+        default:
+            throw new InvalidArgumentException(
+                'Action non prise en charge.'
+            );
+    }
 
     echo json_encode(
-        [
-            'status' => $result['status'],
-            'result' => $result,
-        ],
+        $response,
         JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR
     );
 } catch (UnauthorizedRequestException $exception) {
@@ -85,7 +134,7 @@ try {
 
     echo json_encode(
         [
-            'error' => 'invalid_departments',
+            'error' => 'invalid_request',
             'message' => $exception->getMessage(),
         ],
         JSON_UNESCAPED_UNICODE
@@ -104,6 +153,7 @@ try {
 
     echo json_encode([
         'error' => 'sync_failed',
+        'stage' => $stage,
     ]);
 }
 

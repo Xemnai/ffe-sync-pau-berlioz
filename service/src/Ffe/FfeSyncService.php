@@ -7,9 +7,9 @@ namespace PauBerlioz\FfeSync\Ffe;
 use DateTimeImmutable;
 use DateTimeZone;
 use PauBerlioz\FfeSync\Database;
+use PauBerlioz\FfeSync\Geo\RouteDistanceSyncService;
 use PDO;
 use Throwable;
-use PauBerlioz\FfeSync\Geo\RouteDistanceSyncService;
 
 final class FfeSyncService
 {
@@ -26,25 +26,21 @@ final class FfeSyncService
         $this->parser = new FfeTournamentParser();
     }
 
+    /**
+     * Importe les fiches FFE d'un département.
+     *
+     * Le paramètre $postProcess est volontairement false dans le workflow
+     * multi-départements : groupes, distances et inscriptions sont traités
+     * une seule fois, après l'import des six départements.
+     */
     public function syncDepartment(
         string $department,
-        string $triggerSource
+        string $triggerSource,
+        bool $postProcess = false
     ): array {
         $runId = $this->startRun($triggerSource);
 
-        $stats = [
-            'run_id' => $runId,
-            'references_found' => 0,
-            'selected_references' => [],
-            'created' => 0,
-            'updated' => 0,
-            'ignored' => 0,
-            'errors' => 0,
-            'failed_references' => [],
-            'groups' => null,
-            'registrations' => null,
-            'distances' => null,
-        ];
+        $stats = $this->createStats($runId);
 
         try {
             $listingUrl = sprintf(
@@ -64,6 +60,11 @@ final class FfeSyncService
 
             $knownSources = $this->loadKnownSources($references);
 
+            $today = new DateTimeImmutable(
+                'today',
+                new DateTimeZone('Europe/Paris')
+            );
+
             foreach ($references as $reference) {
                 $known = $knownSources[$reference] ?? null;
 
@@ -79,11 +80,6 @@ final class FfeSyncService
                         $reference,
                         $department,
                         $detailsHtml
-                    );
-
-                    $today = new DateTimeImmutable(
-                        'today',
-                        new DateTimeZone('Europe/Paris')
                     );
 
                     $source['is_upcoming'] =
@@ -123,7 +119,8 @@ final class FfeSyncService
 
                     error_log(
                         sprintf(
-                            '[FFE Sync] Ref %d : %s',
+                            '[FFE Sync] Département %s, référence %d : %s',
+                            $department,
                             $reference,
                             $exception->getMessage()
                         )
@@ -131,40 +128,9 @@ final class FfeSyncService
                 }
             }
 
-            /*
-             * On crée les groupes uniquement après avoir mis à jour les sources.
-             */
-            $stats['groups'] = (
-                new TournamentGroupingService()
-            )->rebuildUpcomingGroups();
-
-            try {
-    $stats['distances'] = (
-        new RouteDistanceSyncService()
-    )->refreshUpcomingGroupDistances();
-} catch (Throwable $exception) {
-    $stats['distances'] = [
-        'origin_status' => 'failed',
-        'error' => $exception->getMessage(),
-    ];
-
-    error_log(
-        '[FFE Distance] Service indisponible : '
-        . $exception->getMessage()
-    );
-}
-            /*
-             * Cette instanciation est volontairement faite ici :
-             * si un problème subsiste dans la partie inscriptions,
-             * le run sera enregistré comme failed dans la base.
-             */
-            $stats['registrations'] = (
-                new ClubRegistrationSyncService()
-            )->refreshUpcomingRegistrations();
-
-            $stats['events'] = (
-    new UpcomingEventPayloadBuilder()
-)->buildUpcomingEvents();
+            if ($postProcess) {
+                $this->runPostProcessing($stats);
+            }
 
             $this->finishRun(
                 $runId,
@@ -183,6 +149,92 @@ final class FfeSyncService
 
             throw $exception;
         }
+    }
+
+    /**
+     * Lance les opérations coûteuses une seule fois, après tous les imports :
+     * - reconstruction des groupes ;
+     * - distances routières ;
+     * - lecture des inscriptions des joueurs du club.
+     *
+     * La construction du payload reste dans events.php. Cela évite d'envoyer
+     * inutilement la liste complète des évènements dans les réponses GitHub.
+     */
+    public function finalizeUpcoming(string $triggerSource): array
+    {
+        $runId = $this->startRun($triggerSource);
+
+        $stats = $this->createStats($runId);
+
+        try {
+            $stats['references_found'] = $this->countUpcomingSources();
+
+            $this->runPostProcessing($stats);
+
+            $this->finishRun(
+                $runId,
+                'succeeded',
+                $stats
+            );
+
+            return $stats;
+        } catch (Throwable $exception) {
+            $this->finishRun(
+                $runId,
+                'failed',
+                $stats,
+                $exception->getMessage()
+            );
+
+            throw $exception;
+        }
+    }
+
+    private function createStats(int $runId): array
+    {
+        return [
+            'run_id' => $runId,
+            'references_found' => 0,
+            'selected_references' => [],
+            'created' => 0,
+            'updated' => 0,
+            'ignored' => 0,
+            'errors' => 0,
+            'failed_references' => [],
+            'groups' => null,
+            'registrations' => null,
+            'distances' => null,
+            'post_processed' => false,
+        ];
+    }
+
+    private function runPostProcessing(array &$stats): void
+    {
+        $stats['groups'] = (
+            new TournamentGroupingService()
+        )->rebuildUpcomingGroups();
+
+        try {
+            $stats['distances'] = (
+                new RouteDistanceSyncService()
+            )->refreshUpcomingGroupDistances();
+        } catch (Throwable $exception) {
+            $stats['distances'] = [
+                'origin_status' => 'failed',
+                'error' => $exception->getMessage(),
+            ];
+
+            error_log(
+                '[FFE Distance] Service indisponible : '
+                . $exception->getMessage()
+            );
+        }
+
+        $stats['registrations'] = (
+            new ClubRegistrationSyncService()
+        )->refreshUpcomingRegistrations();
+
+        $stats['post_processed'] = true;
     }
 
     private function startRun(string $triggerSource): int
@@ -212,6 +264,12 @@ final class FfeSyncService
         array $stats,
         ?string $errorMessage = null
     ): void {
+        $registrations = $stats['registrations'] ?? null;
+
+        $clubEntriesUpdated = is_array($registrations)
+            ? (int) ($registrations['club_entries_updated'] ?? 0)
+            : 0;
+
         $statement = Database::connection()->prepare(
             'UPDATE pbe_sync_runs
              SET
@@ -228,16 +286,26 @@ final class FfeSyncService
 
         $statement->execute([
             ':status' => $status,
-            ':found' => $stats['references_found'],
-            ':created' => $stats['created'],
-            ':updated' => $stats['updated'],
-            ':ignored' => $stats['ignored'],
-            ':club_entries_updated' => (int) (
-                $stats['registrations']['club_entries_updated'] ?? 0
-            ),
+            ':found' => (int) $stats['references_found'],
+            ':created' => (int) $stats['created'],
+            ':updated' => (int) $stats['updated'],
+            ':ignored' => (int) $stats['ignored'],
+            ':club_entries_updated' => $clubEntriesUpdated,
             ':error_message' => $errorMessage,
             ':id' => $runId,
         ]);
+    }
+
+    private function countUpcomingSources(): int
+    {
+        $statement = Database::connection()->query(
+            'SELECT COUNT(*)
+             FROM pbe_tournament_sources
+             WHERE is_upcoming = 1
+               AND is_excluded = 0'
+        );
+
+        return (int) $statement->fetchColumn();
     }
 
     private function loadKnownSources(array $references): array
@@ -253,7 +321,7 @@ final class FfeSyncService
 
         $statement = Database::connection()->prepare(
             sprintf(
-                'SELECT ffe_ref, details_hash, is_upcoming
+                'SELECT ffe_ref, details_hash
                  FROM pbe_tournament_sources
                  WHERE ffe_ref IN (%s)',
                 $placeholders
