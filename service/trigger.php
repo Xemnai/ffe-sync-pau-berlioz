@@ -26,7 +26,17 @@ try {
     $body = file_get_contents('php://input') ?: '';
 
     $stage = 'authentication';
-    SignedRequestAuthenticator::verify($body);
+
+    /*
+     * Compatibilité :
+     * - signature historique utilisée par GitHub Actions ;
+     * - signature X-PBE-* utilisée par le plugin WordPress.
+     */
+    try {
+        SignedRequestAuthenticator::verify($body);
+    } catch (UnauthorizedRequestException) {
+        verifyWordPressSignature($body);
+    }
 
     $stage = 'payload_decoding';
 
@@ -49,11 +59,9 @@ try {
         exit;
     }
 
-    $stage = 'service_construction';
-    $service = new FfeSyncService();
-
     $stage = 'synchronization';
-    $result = $service->syncDepartment(
+
+    $result = (new FfeSyncService())->syncDepartment(
         $department,
         'manual'
     );
@@ -65,7 +73,11 @@ try {
         ],
         JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR
     );
-} catch (UnauthorizedRequestException) {
+} catch (UnauthorizedRequestException $exception) {
+    error_log(
+        '[FFE Trigger] Unauthorized: ' . $exception->getMessage()
+    );
+
     http_response_code(401);
 
     echo json_encode([
@@ -74,7 +86,7 @@ try {
 } catch (Throwable $exception) {
     error_log(
         sprintf(
-            '[FFE Sync Trigger] Stage=%s | %s: %s',
+            '[FFE Trigger] Stage=%s | %s: %s',
             $stage,
             $exception::class,
             $exception->getMessage()
@@ -83,13 +95,91 @@ try {
 
     http_response_code(500);
 
-    echo json_encode(
-        [
-            'error' => 'sync_failed',
-            'stage' => $stage,
-            'exception' => $exception::class,
-            'message' => $exception->getMessage(),
-        ],
-        JSON_UNESCAPED_UNICODE
+    echo json_encode([
+        'error' => 'sync_failed',
+    ]);
+}
+
+function verifyWordPressSignature(string $body): void
+{
+    $timestamp = requestHeader('HTTP_X_PBE_TIMESTAMP');
+    $nonce = requestHeader('HTTP_X_PBE_NONCE');
+    $signature = requestHeader('HTTP_X_PBE_SIGNATURE');
+
+    if (
+        $timestamp === null
+        || $nonce === null
+        || $signature === null
+    ) {
+        throw new UnauthorizedRequestException(
+            'En-têtes WordPress absents.'
+        );
+    }
+
+    if (!ctype_digit($timestamp)) {
+        throw new UnauthorizedRequestException(
+            'Timestamp WordPress invalide.'
+        );
+    }
+
+    if (abs(time() - (int) $timestamp) > 300) {
+        throw new UnauthorizedRequestException(
+            'Timestamp WordPress expiré.'
+        );
+    }
+
+    if (!preg_match('/^[a-zA-Z0-9._-]{16,128}$/', $nonce)) {
+        throw new UnauthorizedRequestException(
+            'Nonce WordPress invalide.'
+        );
+    }
+
+    $configPath = __DIR__ . '/config/runtime.php';
+
+    if (!is_file($configPath)) {
+        throw new RuntimeException(
+            'Configuration privée absente.'
+        );
+    }
+
+    $config = require $configPath;
+
+    $secret = $config['security']['wordpress_to_service_secret'] ?? null;
+
+    if (!is_string($secret) || trim($secret) === '') {
+        throw new RuntimeException(
+            'Secret WordPress vers service absent.'
+        );
+    }
+
+    $expectedSignature = hash_hmac(
+        'sha256',
+        $timestamp . "\n" . $nonce . "\n" . $body,
+        trim($secret)
     );
+
+    $signature = preg_replace(
+        '/^sha256=/i',
+        '',
+        trim($signature)
+    ) ?? trim($signature);
+
+    if (!hash_equals($expectedSignature, $signature)) {
+        throw new UnauthorizedRequestException(
+            'Signature WordPress invalide.'
+        );
+    }
+}
+
+function requestHeader(string $serverKey): ?string
+{
+    $value = $_SERVER[$serverKey] ?? null;
+
+    if (!is_string($value)) {
+        return null;
+    }
+
+    $value = trim($value);
+
+    return $value === '' ? null : $value;
 }
