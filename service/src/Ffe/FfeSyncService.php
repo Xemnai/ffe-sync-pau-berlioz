@@ -239,6 +239,8 @@ final class FfeSyncService
 
     private function startRun(string $triggerSource): int
     {
+        $triggerSource = $triggerSource === 'cron' ? 'cron' : 'manual';
+
         $statement = Database::connection()->prepare(
             'INSERT INTO pbe_sync_runs (
                 trigger_source,
